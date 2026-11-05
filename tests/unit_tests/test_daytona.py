@@ -921,6 +921,40 @@ class TestDaytonaGpuAndCatalog:
             assert '1x-B200' in list(df['InstanceType'])
         mock_get.assert_not_called()
 
+    def test_upgrade_replaces_a_stale_bundled_catalog(self, monkeypatch,
+                                                      tmp_path):
+        monkeypatch.setattr(catalog_common, '_ABSOLUTE_VERSIONED_CATALOG_DIR',
+                            str(tmp_path))
+        # Reading a column loads the lazily read catalog.
+        assert list(
+            catalog_common.read_catalog('daytona/vms.csv')['InstanceType'])
+        cached = catalog_common.get_catalog_path('daytona/vms.csv')
+        md5_path = os.path.join(str(tmp_path), '.meta', 'daytona',
+                                'vms.csv.md5')
+        # The copy an older package installed, with its md5 recorded.
+        with open(cached, encoding='utf-8') as f:
+            old = ''.join(line for line in f if 'B200' not in line)
+        with open(cached, 'w', encoding='utf-8') as f:
+            f.write(old)
+        with open(md5_path, 'w', encoding='utf-8') as f:
+            f.write(common_utils.hash_file(cached, 'md5').hexdigest())
+        df = catalog_common.read_catalog('daytona/vms.csv')
+        assert '1x-B200' in list(df['InstanceType'])
+
+    def test_a_user_edited_bundled_catalog_is_kept(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(catalog_common, '_ABSOLUTE_VERSIONED_CATALOG_DIR',
+                            str(tmp_path))
+        # Reading a column loads the lazily read catalog.
+        assert list(
+            catalog_common.read_catalog('daytona/vms.csv')['InstanceType'])
+        cached = catalog_common.get_catalog_path('daytona/vms.csv')
+        with open(cached, encoding='utf-8') as f:
+            edited = ''.join(line for line in f if 'B200' not in line)
+        with open(cached, 'w', encoding='utf-8') as f:
+            f.write(edited)
+        df = catalog_common.read_catalog('daytona/vms.csv')
+        assert '1x-B200' not in list(df['InstanceType'])
+
     def test_prices_come_from_the_bundled_catalog(self):
         on_demand = daytona_catalog.get_hourly_cost('1x-RTX4090',
                                                     use_spot=False)

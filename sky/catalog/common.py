@@ -229,6 +229,14 @@ def read_catalog(filename: str,
     def _need_update() -> bool:
         if not os.path.exists(catalog_path):
             return True
+        bundled_path = get_bundled_catalog_path(filename)
+        if bundled_path is not None:
+            # A bundled catalog ships with the package, so an upgrade must
+            # replace the cached copy at once, unless the user edited it.
+            if is_catalog_modified(filename):
+                return False
+            return (common_utils.hash_file(catalog_path, 'md5').hexdigest() !=
+                    common_utils.hash_file(bundled_path, 'md5').hexdigest())
         if pull_frequency_hours is None:
             return False
         if is_catalog_modified(filename):
