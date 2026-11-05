@@ -21,7 +21,9 @@ from sky.provision import common as provision_common
 from sky.provision.modal import instance as modal_instance
 from sky.provision.modal import utils as modal_utils
 from sky.utils import command_runner
+from sky.utils import common_utils
 from sky.utils import resources_utils
+from sky.utils import schemas
 from sky.utils import status_lib
 
 
@@ -469,6 +471,44 @@ class TestModalCloud:
             clouds.Region('global'), None, 1)
         assert variables['timeout_seconds'] == expected
         assert variables['gpu'] == ''
+
+    def test_task_config_sets_sandbox_timeout(self):
+        # The path beekeeper uses: a task-level `config:` override.
+        task = sky.Task.from_yaml_config({
+            'resources': {
+                'infra': 'modal',
+                'cpus': '4',
+                'memory': '16',
+            },
+            'config': {
+                'modal': {
+                    'timeout_minutes': 45
+                }
+            },
+        })
+        cloud = modal_cloud.Modal()
+        [requested] = list(task.resources)
+        [launchable
+        ] = cloud._get_feasible_launchable_resources(requested).resources_list
+        variables = cloud.make_deploy_resources_variables(
+            launchable, resources_utils.ClusterName('c', 'c-1'),
+            clouds.Region('global'), None, 1)
+        assert variables['timeout_seconds'] == 45 * 60
+
+    @pytest.mark.parametrize('minutes,valid', [
+        (1, True),
+        (24 * 60, True),
+        (0, False),
+        (24 * 60 + 1, False),
+    ])
+    def test_timeout_minutes_schema_bounds(self, minutes, valid):
+        config = {'modal': {'timeout_minutes': minutes}}
+        if valid:
+            common_utils.validate_schema(config, schemas.get_config_schema())
+        else:
+            with pytest.raises(ValueError):
+                common_utils.validate_schema(config,
+                                             schemas.get_config_schema())
 
     def test_deploy_variables_render_template(self):
         cloud = modal_cloud.Modal()
