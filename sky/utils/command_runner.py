@@ -1943,6 +1943,15 @@ class ModalCommandRunner(CommandRunner):
     stands in for `ssh <host> <command>`; the sandbox needs no SSH server.
     """
 
+    # Modal rejects a command whose arguments total more than 2**16 bytes. Leave
+    # room for what _get_command_to_run wraps around it; above this, callers
+    # upload the script instead of inlining it.
+    _MAX_INLINE_COMMAND_LENGTH = 60 * 1024
+    # Give the local timeout the chance to fire first, so callers see the
+    # subprocess.TimeoutExpired they expect. The sandbox's deadline is there to
+    # end the command, which killing the local helper cannot do.
+    _REMOTE_TIMEOUT_MARGIN_SECONDS = 5
+
     def __init__(self, node: Tuple[str, str], **kwargs):
         """node is ('modal', <sandbox id>)."""
         del kwargs  # No SSH credentials are used.
@@ -1952,6 +1961,9 @@ class ModalCommandRunner(CommandRunner):
     @property
     def node_id(self) -> str:
         return f'modal-{self.sandbox_id}'
+
+    def max_inline_command_length(self) -> int:
+        return self._MAX_INLINE_COMMAND_LENGTH
 
     def _exec_command(self) -> str:
         return f'{shlex.quote(sys.executable)} {shlex.quote(MODAL_EXEC_HELPER)}'
@@ -1981,7 +1993,8 @@ class ModalCommandRunner(CommandRunner):
             run_in_background: bool = False,
             **kwargs) -> Union[int, Tuple[int, str, str]]:
         """Runs `cmd` in the sandbox. See SSHCommandRunner.run."""
-        del connect_timeout  # Exec has no separate connect phase.
+        if connect_timeout is None:
+            connect_timeout = _DEFAULT_CONNECT_TIMEOUT
         assert port_forward is None, ('port_forward is not supported on '
                                       f'Modal, but got: {port_forward}')
         if ssh_mode == SshMode.LOGIN:
@@ -1997,6 +2010,13 @@ class ModalCommandRunner(CommandRunner):
             run_in_background=run_in_background)
         command = [
             self._exec_command(),
+            f'--connect-timeout {int(connect_timeout)}',
+        ]
+        if kwargs.get('timeout') is not None:
+            remote_timeout = (int(kwargs['timeout']) +
+                              self._REMOTE_TIMEOUT_MARGIN_SECONDS)
+            command.append(f'--timeout {remote_timeout}')
+        command += [
             shlex.quote(self.sandbox_id),
             shlex.quote(command_str),
         ]
