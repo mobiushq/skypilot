@@ -143,7 +143,10 @@ def get_command_runners(
     cluster_info: common.ClusterInfo,
     **credentials: Dict[str, Any],
 ) -> List[command_runner.CommandRunner]:
-    """Returns a ModalCommandRunner per sandbox, head first."""
+    """Returns a ModalCommandRunner per sandbox, head first.
+
+    Each runner's node is a 1-tuple of the sandbox's Modal object ID.
+    """
     sandbox_ids = list(cluster_info.instances.keys())
     head = cluster_info.head_instance_id
     if head is not None and head in sandbox_ids:
@@ -152,7 +155,8 @@ def get_command_runners(
     # ModalCommandRunner is added to command_runner by the Modal runner
     # change; drop the ignore once both are on the same branch.
     runner_cls = command_runner.ModalCommandRunner  # type: ignore[attr-defined]
-    return runner_cls.make_runner_list(sandbox_ids, **credentials)
+    return runner_cls.make_runner_list([(sid,) for sid in sandbox_ids],
+                                       **credentials)
 
 
 def query_instances(

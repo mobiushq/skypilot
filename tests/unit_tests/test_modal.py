@@ -381,7 +381,7 @@ class TestModalProvisioning:
         )
         assert modal_instance.get_command_runners(
             info, ssh_user='root') == ['runner']
-        assert calls == [(['sb-1', 'sb-2'], {'ssh_user': 'root'})]
+        assert calls == [([('sb-1',), ('sb-2',)], {'ssh_user': 'root'})]
 
 
 class TestModalCatalog:
