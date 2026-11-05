@@ -1,10 +1,12 @@
 """Daytona sandbox provisioning."""
 
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.parse
 
 from sky import sky_logging
 from sky.provision import common
 from sky.provision.daytona import utils
+from sky.utils import resources_utils
 from sky.utils import status_lib
 
 PROVIDER_NAME = 'daytona'
@@ -63,6 +65,7 @@ def run_instances(
     image_id = node_config.get('ImageId') or None
     disk_size = node_config.get('DiskSize')
     use_spot = bool(node_config.get('Preemptible', False))
+    ttl_minutes = node_config.get('TtlMinutes') or None
 
     sandbox_id = utils.launch_sandbox(
         cluster_name_on_cloud=cluster_name_on_cloud,
@@ -71,6 +74,7 @@ def run_instances(
         use_spot=use_spot,
         disk_size=disk_size,
         image_id=image_id,
+        ttl_minutes=ttl_minutes,
     )
     logger.debug(f'Created sandbox {sandbox_id} for cluster '
                  f'{cluster_name_on_cloud}')
@@ -183,20 +187,71 @@ def query_instances(
 
 def open_ports(
     cluster_name_on_cloud: str,
-    ports: list,
+    ports: List[str],
     provider_config: Optional[dict] = None,
 ) -> None:
-    """Opening ports is not supported for Daytona."""
-    raise NotImplementedError('open_ports is not supported for Daytona.')
+    """Every port in Daytona's preview range is reachable through its
+    preview proxy, so there is nothing to open; only the range is checked."""
+    del cluster_name_on_cloud, provider_config  # unused
+    utils.check_preview_ports(resources_utils.port_ranges_to_set(ports))
 
 
 def cleanup_ports(
     cluster_name_on_cloud: str,
+    ports: List[str],
     provider_config: Optional[dict] = None,
-    ports: Optional[list] = None,
 ) -> None:
-    """Cleanup ports. Not supported for Daytona."""
-    raise NotImplementedError('cleanup_ports is not supported for Daytona.')
+    """Preview URLs go away with the sandbox; nothing to clean up."""
+    del cluster_name_on_cloud, ports, provider_config  # unused
+
+
+def query_ports(
+    cluster_name_on_cloud: str,
+    ports: List[str],
+    head_ip: Optional[str] = None,
+    provider_config: Optional[Dict[str, Any]] = None,
+) -> Dict[int, List[common.Endpoint]]:
+    """Returns each port's preview URL.
+
+    The URL is signed (the access token is embedded) so `sky status
+    --endpoints` output can be opened directly. If signing fails, the plain
+    preview URL is returned; it needs the token from
+    `utils.get_preview_url` in the `x-daytona-preview-token` header.
+    """
+    del head_ip  # unused
+    expires = int((provider_config or
+                   {}).get('preview_url_expires_seconds',
+                           utils.DEFAULT_PREVIEW_URL_EXPIRES_SECONDS))
+    started = [
+        sandbox_id for sandbox_id, sandbox in _non_terminated_sandboxes(
+            cluster_name_on_cloud).items()
+        if (sandbox.get('state') or '').lower() == 'started'
+    ]
+    if not started:
+        return {}
+    sandbox_id = started[0]
+    endpoints: Dict[int, List[common.Endpoint]] = {}
+    for port in sorted(resources_utils.port_ranges_to_set(ports)):
+        if not utils.PREVIEW_PORT_MIN <= port <= utils.PREVIEW_PORT_MAX:
+            continue
+        try:
+            url = utils.get_signed_preview_url(sandbox_id, port, expires)
+        except utils.DaytonaError as e:
+            logger.debug(f'Signing the preview URL of port {port} failed, '
+                         f'using the token-protected URL: {e}')
+            url, _ = utils.get_preview_url(sandbox_id, port)
+        endpoints[port] = [_endpoint(url)]
+    return endpoints
+
+
+def _endpoint(url: str) -> common.Endpoint:
+    parts = urllib.parse.urlsplit(url)
+    path = parts.path.lstrip('/')
+    if parts.query:
+        path += f'?{parts.query}'
+    cls = (common.HTTPEndpoint
+           if parts.scheme == 'http' else common.HTTPSEndpoint)
+    return cls(port=None, host=parts.netloc, path=path)
 
 
 def cleanup_custom_multi_network(

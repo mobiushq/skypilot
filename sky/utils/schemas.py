@@ -2395,6 +2395,21 @@ def get_config_schema():
                 }
             },
         },
+        'daytona': {
+            'type': 'object',
+            'required': [],
+            'additionalProperties': False,
+            'properties': {
+                'ttl_minutes': {
+                    'type': 'integer',
+                    'minimum': 0,
+                },
+                'preview_url_expires_seconds': {
+                    'type': 'integer',
+                    'minimum': 1,
+                },
+            }
+        },
         'vast': {
             'type': 'object',
             'required': [],

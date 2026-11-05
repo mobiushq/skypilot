@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from sky import catalog
 from sky import clouds
+from sky import skypilot_config
 from sky.provision.daytona import utils as daytona_utils
 from sky.utils import registry
 from sky.utils import resources_utils
@@ -42,8 +43,6 @@ class Daytona(clouds.Cloud):
         clouds.CloudImplementationFeatures.MULTI_NODE:
             (f'Multi-node clusters are not supported on {_REPR}. '
              'Sandboxes are isolated; each cluster runs on one sandbox.'),
-        clouds.CloudImplementationFeatures.OPEN_PORTS:
-            (f'Opening ports is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.STORAGE_MOUNTING:
             (f'Storage mounting is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.CUSTOM_DISK_TIER:
@@ -182,6 +181,16 @@ class Daytona(clouds.Cloud):
     def _get_feasible_launchable_resources(
         self, resources: 'resources_lib.Resources'
     ) -> 'resources_utils.FeasibleResources':
+        if resources.ports:
+            ports = resources_utils.port_ranges_to_set(resources.ports)
+            outside = sorted(p for p in ports
+                             if not daytona_utils.PREVIEW_PORT_MIN <= p <=
+                             daytona_utils.PREVIEW_PORT_MAX)
+            if outside:
+                return resources_utils.FeasibleResources(
+                    [], [], f'Daytona exposes only ports '
+                    f'{daytona_utils.PREVIEW_PORT_MIN}-'
+                    f'{daytona_utils.PREVIEW_PORT_MAX} (got {outside}).')
         if resources.instance_type is not None:
             assert resources.is_launchable(), resources
             # Instance type already encodes the accelerator on Daytona.
@@ -313,10 +322,31 @@ class Daytona(clouds.Cloud):
                 image_id = resources.image_id.get(None, '')
         image_id = image_id or ''
 
+        # Optional hard lifetime: Daytona destroys the sandbox this many
+        # minutes after creation, whatever SkyPilot's state. 0 disables it.
+        ttl_minutes = skypilot_config.get_effective_region_config(
+            cloud='daytona',
+            region=region.name,
+            keys=('ttl_minutes',),
+            default_value=0,
+            override_configs=resources.cluster_config_overrides,
+        )
+        preview_url_expires_seconds = (
+            skypilot_config.get_effective_region_config(
+                cloud='daytona',
+                region=region.name,
+                keys=('preview_url_expires_seconds',),
+                default_value=(
+                    daytona_utils.DEFAULT_PREVIEW_URL_EXPIRES_SECONDS),
+                override_configs=resources.cluster_config_overrides,
+            ))
+
         return {
             'instance_type': resources.instance_type,
             'custom_resources': custom_resources,
             'region': region.name,
             'image_id': image_id,
             'use_spot': resources.use_spot,
+            'ttl_minutes': int(ttl_minutes or 0),
+            'preview_url_expires_seconds': int(preview_url_expires_seconds),
         }

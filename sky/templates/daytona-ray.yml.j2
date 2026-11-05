@@ -11,6 +11,7 @@ provider:
   type: external
   module: sky.provision.daytona
   region: "{{region}}"
+  preview_url_expires_seconds: {{preview_url_expires_seconds}}
   # Ray's autoscaler periodically checks if workers' launch config hash
   # matches the current YAML. On mismatch (e.g. after re-provision) it
   # terminates the "stale" worker and tries to replace it, leaking VMs.
@@ -32,6 +33,7 @@ available_node_types:
       DiskSize: {{disk_size}}
       ImageId: {{image_id}}
       Preemptible: {{use_spot}}
+      TtlMinutes: {{ttl_minutes}}
 
 head_node_type: ray_head_default
 

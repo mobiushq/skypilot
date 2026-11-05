@@ -1,10 +1,13 @@
 """Tests for the Daytona cloud provider."""
 
+import json
 from unittest import mock
 
 import pytest
 
 from sky import clouds
+from sky import resources as resources_lib
+from sky.catalog import common as catalog_common
 from sky.clouds import daytona
 from sky.provision.daytona import instance as daytona_instance
 from sky.provision.daytona import utils as daytona_utils
@@ -225,6 +228,7 @@ class TestDaytonaProvisioning:
             use_spot=False,
             disk_size=256,
             image_id=None,
+            ttl_minutes=None,
         )
         mock_wait.assert_called_once_with('sbx-1')
 
@@ -273,9 +277,10 @@ class TestDaytonaProvisioning:
         with pytest.raises(NotImplementedError):
             daytona_instance.stop_instances('cluster-abcd')
 
-    def test_open_ports_unsupported(self):
-        with pytest.raises(NotImplementedError):
-            daytona_instance.open_ports('cluster-abcd', ['8080'])
+    def test_open_ports_checks_preview_range(self):
+        daytona_instance.open_ports('cluster-abcd', ['8080', '3000-3002'])
+        with pytest.raises(daytona_utils.DaytonaError, match='3000-9999'):
+            daytona_instance.open_ports('cluster-abcd', ['22'])
 
     @mock.patch.object(daytona_utils, 'list_cluster_sandboxes')
     def test_query_instances(self, mock_list):
@@ -302,7 +307,8 @@ class TestDaytonaCloudFeatures:
         features = daytona.Daytona._CLOUD_UNSUPPORTED_FEATURES  # pylint: disable=protected-access
         assert clouds.CloudImplementationFeatures.STOP in features
         assert clouds.CloudImplementationFeatures.MULTI_NODE in features
-        assert clouds.CloudImplementationFeatures.OPEN_PORTS in features
+        # Ports are exposed as preview URLs.
+        assert clouds.CloudImplementationFeatures.OPEN_PORTS not in features
         # Custom docker images are supported.
         assert (clouds.CloudImplementationFeatures.IMAGE_ID not in features)
         # Spot GPU sandboxes are supported.
@@ -355,3 +361,210 @@ class TestDaytonaSpotDefaults:
     def test_no_default_instance_type_for_spot(self):
         from sky.catalog import daytona_catalog
         assert daytona_catalog.get_default_instance_type(use_spot=True) is None
+
+
+class FakeDaytonaAPI:
+    """In-memory stand-in for the Daytona REST API behind `_request`."""
+
+    def __init__(self, sign_fails=False):
+        self.sandboxes = {}
+        self.created = []
+        self.sign_fails = sign_fails
+        self._next = 0
+
+    def __call__(self, method, path, params=None, body=None, timeout=None):
+        del timeout
+        parts = path.strip('/').split('/')
+        if path == '/api-keys/current':
+            return {'organizationId': 'org-1'}
+        if path.endswith('/gpu-capacity'):
+            return {'capacity': []}
+        if method == 'POST' and path == '/sandbox':
+            self._next += 1
+            sandbox_id = f'sbx-{self._next}'
+            self.sandboxes[sandbox_id] = {
+                'id': sandbox_id,
+                'state': 'started',
+                'labels': body['labels'],
+            }
+            self.created.append(body)
+            return {'id': sandbox_id}
+        if method == 'GET' and path == '/sandbox':
+            want = json.loads(params['labels'])
+            return [
+                s for s in self.sandboxes.values()
+                if all(s['labels'].get(k) == v for k, v in want.items())
+            ]
+        sandbox_id = parts[1]
+        if sandbox_id not in self.sandboxes:
+            raise daytona_utils.DaytonaError(
+                f'Daytona API error 404 on {method} {path}')
+        if method == 'DELETE':
+            del self.sandboxes[sandbox_id]
+            return None
+        if parts[2:3] == ['ssh-access']:
+            return {'token': f'ssh-{sandbox_id}'}
+        if parts[2:3] == ['ports']:
+            port = parts[3]
+            if parts[4] == 'signed-preview-url':
+                if self.sign_fails:
+                    raise daytona_utils.DaytonaError('Daytona API error 400')
+                assert params['expiresInSeconds'] > 0
+                return {
+                    'url': f'https://{port}-signed.proxy.daytona.works',
+                    'token': 'signed',
+                    'port': int(port),
+                    'sandboxId': sandbox_id,
+                }
+            return {
+                'url': f'https://{port}-{sandbox_id}.proxy.daytona.works',
+                'token': 'preview-token',
+                'sandboxId': sandbox_id,
+            }
+        return self.sandboxes[sandbox_id]
+
+
+def _provision_config(**node_config):
+    config = mock.MagicMock()
+    config.count = 1
+    config.node_config = {
+        'InstanceType': '1x-RTX4090',
+        'DiskSize': 50,
+        'ImageId': '',
+        'Preemptible': False,
+        **node_config,
+    }
+    return config
+
+
+class TestDaytonaLifecycle:
+    """Provision, status, endpoints and teardown against a fake API."""
+
+    def test_full_lifecycle(self):
+        api = FakeDaytonaAPI()
+        with mock.patch.object(daytona_utils, '_request', api):
+            daytona_utils._get_organization_id.cache_clear()  # pylint: disable=protected-access
+            record = daytona_instance.run_instances(
+                'earth', 'c', 'c-abcd', _provision_config(TtlMinutes=30))
+            sandbox_id = record.head_instance_id
+            assert record.created_instance_ids == [sandbox_id]
+            body = api.created[0]
+            assert body['ttlMinutes'] == 30
+            assert body['labels'] == {daytona_utils.CLUSTER_LABEL: 'c-abcd'}
+            assert body['autoStopInterval'] == 0
+
+            # Launching again reuses the sandbox.
+            again = daytona_instance.run_instances('earth', 'c', 'c-abcd',
+                                                   _provision_config())
+            assert not again.created_instance_ids
+            assert len(api.created) == 1
+
+            assert daytona_instance.query_instances('c', 'c-abcd') == {
+                sandbox_id: (status_lib.ClusterStatus.UP, None)
+            }
+            info = daytona_instance.get_cluster_info('earth', 'c-abcd')
+            assert info.ssh_user == f'ssh-{sandbox_id}'
+
+            endpoints = daytona_instance.query_ports(
+                'c-abcd', ['8080'],
+                provider_config={'preview_url_expires_seconds': 600})
+            assert endpoints[8080][0].url() == (
+                'https://8080-signed.proxy.daytona.works/')
+
+            daytona_instance.terminate_instances('c-abcd')
+            assert not api.sandboxes
+            assert not daytona_instance.query_instances('c', 'c-abcd')
+            assert not daytona_instance.query_ports('c-abcd', ['8080'])
+            # Tearing down twice is harmless.
+            daytona_instance.terminate_instances('c-abcd')
+
+    def test_no_ttl_by_default(self):
+        api = FakeDaytonaAPI()
+        with mock.patch.object(daytona_utils, '_request', api):
+            daytona_instance.run_instances('earth', 'c', 'c-abcd',
+                                           _provision_config(TtlMinutes=0))
+        assert 'ttlMinutes' not in api.created[0]
+
+    def test_sandbox_destroyed_by_ttl_reads_as_terminated(self):
+        api = FakeDaytonaAPI()
+        with mock.patch.object(daytona_utils, '_request', api):
+            daytona_instance.run_instances('earth', 'c', 'c-abcd',
+                                           _provision_config(TtlMinutes=5))
+            for sandbox in api.sandboxes.values():
+                sandbox['state'] = 'destroyed'
+            assert not daytona_instance.query_instances('c', 'c-abcd')
+
+
+class TestDaytonaPorts:
+    """Ports are exposed as Daytona preview URLs."""
+
+    def test_signed_url_failure_falls_back_to_token_url(self):
+        api = FakeDaytonaAPI(sign_fails=True)
+        with mock.patch.object(daytona_utils, '_request', api):
+            daytona_instance.run_instances('earth', 'c', 'c-abcd',
+                                           _provision_config())
+            endpoints = daytona_instance.query_ports('c-abcd', ['8080-8081'])
+            assert sorted(endpoints) == [8080, 8081]
+            assert endpoints[8080][0].url() == (
+                'https://8080-sbx-1.proxy.daytona.works/')
+            assert daytona_utils.get_preview_url(
+                'sbx-1', 8080) == ('https://8080-sbx-1.proxy.daytona.works',
+                                   'preview-token')
+
+    def test_ports_outside_preview_range_are_skipped(self):
+        api = FakeDaytonaAPI()
+        with mock.patch.object(daytona_utils, '_request', api):
+            daytona_instance.run_instances('earth', 'c', 'c-abcd',
+                                           _provision_config())
+            assert sorted(daytona_instance.query_ports(
+                'c-abcd', ['22', '8080'])) == [8080]
+
+    def test_only_started_sandboxes_are_queried(self):
+        api = FakeDaytonaAPI()
+        with mock.patch.object(daytona_utils, '_request', api):
+            daytona_instance.run_instances('earth', 'c', 'c-abcd',
+                                           _provision_config())
+            api.sandboxes['sbx-1']['state'] = 'starting'
+            assert not daytona_instance.query_ports('c-abcd', ['8080'])
+
+    def test_endpoint_keeps_scheme_and_path(self):
+        endpoint = daytona_instance._endpoint(  # pylint: disable=protected-access
+            'http://localhost:4000/proxy/8080?token=x')
+        assert endpoint.url() == 'http://localhost:4000/proxy/8080?token=x'
+
+    def test_feasibility_rejects_ports_outside_range(self):
+        r = resources_lib.Resources(infra='daytona',
+                                    accelerators='RTX4090:1',
+                                    ports=['22'])
+        feasible = daytona.Daytona()._get_feasible_launchable_resources(r)  # pylint: disable=protected-access
+        assert not feasible.resources_list
+        assert '3000-9999' in feasible.hint
+
+    def test_deploy_variables_carry_ttl_and_expiry(self):
+        r = resources_lib.Resources(infra='daytona/earth',
+                                    instance_type='1x-RTX4090')
+        overrides = {
+            'daytona': {
+                'ttl_minutes': 20,
+                'preview_url_expires_seconds': 900
+            }
+        }
+        r = r.copy(_cluster_config_overrides=overrides)
+        variables = daytona.Daytona().make_deploy_resources_variables(
+            r, mock.MagicMock(), clouds.Region('earth'), None, 1)
+        assert variables['ttl_minutes'] == 20
+        assert variables['preview_url_expires_seconds'] == 900
+
+
+class TestDaytonaBundledCatalog:
+    """The fork ships the Daytona catalog; nothing is fetched."""
+
+    def test_catalog_is_bundled(self):
+        assert catalog_common.get_bundled_catalog_path('daytona/vms.csv')
+
+    def test_prices_come_from_the_bundled_catalog(self):
+        from sky.catalog import daytona_catalog
+        on_demand = daytona_catalog.get_hourly_cost('1x-RTX4090',
+                                                    use_spot=False)
+        spot = daytona_catalog.get_hourly_cost('1x-RTX4090', use_spot=True)
+        assert 0 < spot < on_demand

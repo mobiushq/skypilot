@@ -80,6 +80,17 @@ class InstanceTypeInfo(NamedTuple):
     region: str
 
 
+# Catalogs shipped inside the package, for clouds that have no hosted catalog
+# yet (Daytona, Modal). A bundled catalog is used instead of the hosted one.
+_BUNDLED_CATALOG_DIR = os.path.join(os.path.dirname(__file__), 'bundled',
+                                    constants.CATALOG_SCHEMA_VERSION)
+
+
+def get_bundled_catalog_path(filename: str) -> Optional[str]:
+    path = os.path.join(_BUNDLED_CATALOG_DIR, filename)
+    return path if os.path.exists(path) else None
+
+
 def get_catalog_path(filename: str) -> str:
     # Pure path getter, no side effects. Callers that intend to write
     # to the returned path must create the parent dir themselves. This
@@ -242,6 +253,26 @@ def read_catalog(filename: str,
             # Double check after acquiring the lock.
             if not _need_update():
                 return False
+
+            bundled_path = get_bundled_catalog_path(filename)
+            if bundled_path is not None:
+                with open(bundled_path, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                os.makedirs(os.path.dirname(catalog_path), exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                        mode='w',
+                        dir=os.path.dirname(catalog_path),
+                        delete=False,
+                        encoding='utf-8') as f:
+                    f.write(text)
+                    tmp_path = f.name
+                os.rename(tmp_path, catalog_path)
+                with open(meta_path + '.md5', 'w', encoding='utf-8') as f:
+                    f.write(
+                        hashlib.md5(text.encode(),
+                                    usedforsecurity=False).hexdigest())
+                logger.debug(f'Installed bundled {cloud} catalog {filename}.')
+                return True
 
             url = f'{constants.HOSTED_CATALOG_DIR_URL}/{constants.CATALOG_SCHEMA_VERSION}/{filename}'  # pylint: disable=line-too-long
             url_fallback = f'{constants.HOSTED_CATALOG_DIR_URL_S3_MIRROR}/{constants.CATALOG_SCHEMA_VERSION}/{filename}'  # pylint: disable=line-too-long

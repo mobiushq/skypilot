@@ -16,7 +16,7 @@ import functools
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
@@ -41,6 +41,14 @@ SSH_TOKEN_EXPIRES_MINUTES = 365 * 24 * 60  # 1 year.
 
 # Label used to associate sandboxes with a SkyPilot cluster.
 CLUSTER_LABEL = 'skypilot-cluster'
+
+# Daytona serves authenticated HTTPS preview URLs for any port in this range
+# (https://www.daytona.io/docs/en/preview-and-authentication).
+PREVIEW_PORT_MIN = 3000
+PREVIEW_PORT_MAX = 9999
+# Lifetime of the signed preview URLs returned by `sky status --endpoints`.
+# Configurable via `daytona.preview_url_expires_seconds`.
+DEFAULT_PREVIEW_URL_EXPIRES_SECONDS = 60 * 60
 
 # Default sandbox image. Sandboxes are created through the dynamic image
 # build path (`buildInfo` with a `FROM <image>` Dockerfile): it is the
@@ -282,6 +290,7 @@ def launch_sandbox(
     use_spot: bool,
     disk_size: Optional[int] = None,
     image_id: Optional[str] = None,
+    ttl_minutes: Optional[int] = None,
 ) -> str:
     """Creates a sandbox for the cluster and returns its ID.
 
@@ -320,6 +329,10 @@ def launch_sandbox(
                 logger.debug(
                     'Skipping default disk size for Daytona CPU sandbox; '
                     'using the platform default.')
+    if ttl_minutes:
+        # Hard backstop: Daytona destroys the sandbox this many minutes after
+        # creation, even if SkyPilot (or its API server) is gone.
+        body['ttlMinutes'] = int(ttl_minutes)
     body['buildInfo'] = {
         'dockerfileContent': f'FROM {image_id or DEFAULT_IMAGE}'
     }
@@ -378,3 +391,32 @@ def create_ssh_token(sandbox_id: str) -> str:
     if not token:
         raise DaytonaError(f'SSH access response has no token: {data}')
     return token
+
+
+def check_preview_ports(ports: Iterable[int]) -> None:
+    """Raises if any port is outside the range Daytona can preview."""
+    bad = sorted(
+        p for p in ports if not PREVIEW_PORT_MIN <= p <= PREVIEW_PORT_MAX)
+    if bad:
+        raise DaytonaError(
+            f'Daytona can only expose ports {PREVIEW_PORT_MIN}-'
+            f'{PREVIEW_PORT_MAX} (as HTTPS preview URLs); got {bad}.')
+
+
+def get_preview_url(sandbox_id: str, port: int) -> Tuple[str, str]:
+    """Returns the preview URL of a port and the access token it needs.
+
+    Clients send the token in the `x-daytona-preview-token` header.
+    """
+    data = _request('GET', f'/sandbox/{sandbox_id}/ports/{port}/preview-url')
+    return data['url'], data['token']
+
+
+def get_signed_preview_url(sandbox_id: str, port: int,
+                           expires_in_seconds: int) -> str:
+    """Returns a preview URL with its access token embedded, so it can be
+    opened without a header until it expires."""
+    data = _request('GET',
+                    f'/sandbox/{sandbox_id}/ports/{port}/signed-preview-url',
+                    params={'expiresInSeconds': expires_in_seconds})
+    return data['url']
