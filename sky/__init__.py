@@ -170,6 +170,7 @@ Nebius = clouds.Nebius
 Hyperbolic = clouds.Hyperbolic
 Mithril = clouds.Mithril
 Daytona = clouds.Daytona
+Modal = clouds.Modal
 Shadeform = clouds.Shadeform
 Seeweb = clouds.Seeweb
 Yotta = clouds.Yotta
@@ -199,6 +200,7 @@ __all__ = [
     'Hyperbolic',
     'Mithril',
     'Daytona',
+    'Modal',
     'Shadeform',
     'Seeweb',
     'Yotta',

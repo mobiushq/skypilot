@@ -1930,6 +1930,121 @@ class KubernetesCommandRunner(CommandRunner):
             timeout=timeout)
 
 
+# Runs a command in a Modal sandbox; a standalone script so each call only
+# imports `modal`. See sky/provision/modal/exec_helper.py.
+MODAL_EXEC_HELPER = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                 'provision', 'modal', 'exec_helper.py')
+
+
+class ModalCommandRunner(CommandRunner):
+    """Runner for Modal sandboxes.
+
+    Commands and rsync go through `Sandbox.exec` via MODAL_EXEC_HELPER, which
+    stands in for `ssh <host> <command>`; the sandbox needs no SSH server.
+    """
+
+    def __init__(self, node: Tuple[str, str], **kwargs):
+        """node is ('modal', <sandbox id>)."""
+        del kwargs  # No SSH credentials are used.
+        super().__init__(node)
+        _, self.sandbox_id = node
+
+    @property
+    def node_id(self) -> str:
+        return f'modal-{self.sandbox_id}'
+
+    def _exec_command(self) -> str:
+        return f'{shlex.quote(sys.executable)} {shlex.quote(MODAL_EXEC_HELPER)}'
+
+    def port_forward_command(
+            self,
+            port_forward: List[Tuple[int, int]],
+            connect_timeout: int = 1,
+            ssh_mode: SshMode = SshMode.INTERACTIVE) -> List[str]:
+        raise NotImplementedError('Port forwarding is not supported on Modal.')
+
+    @timeline.event
+    @context_utils.cancellation_guard
+    def run(self,
+            cmd: Union[str, List[str]],
+            *,
+            port_forward: Optional[List[int]] = None,
+            require_outputs: bool = False,
+            log_path: str = os.devnull,
+            process_stream: bool = True,
+            stream_logs: bool = True,
+            ssh_mode: SshMode = SshMode.NON_INTERACTIVE,
+            separate_stderr: bool = False,
+            connect_timeout: Optional[int] = None,
+            source_bashrc: bool = False,
+            skip_num_lines: int = 0,
+            run_in_background: bool = False,
+            **kwargs) -> Union[int, Tuple[int, str, str]]:
+        """Runs `cmd` in the sandbox. See SSHCommandRunner.run."""
+        del connect_timeout  # Exec has no separate connect phase.
+        assert port_forward is None, ('port_forward is not supported on '
+                                      f'Modal, but got: {port_forward}')
+        if ssh_mode == SshMode.LOGIN:
+            raise NotImplementedError(
+                'Interactive login is not supported on Modal clusters; use '
+                f'`modal shell {self.sandbox_id}`.')
+        command_str = self._get_command_to_run(
+            cmd,
+            process_stream,
+            separate_stderr,
+            skip_num_lines=skip_num_lines,
+            source_bashrc=source_bashrc,
+            run_in_background=run_in_background)
+        command = [
+            self._exec_command(),
+            shlex.quote(self.sandbox_id),
+            shlex.quote(command_str),
+        ]
+        log_dir = os.path.expanduser(os.path.dirname(log_path))
+        os.makedirs(log_dir, exist_ok=True)
+        executable = None
+        if not process_stream:
+            if stream_logs:
+                command += [f'| tee {log_path}', '; exit ${PIPESTATUS[0]}']
+            else:
+                command += [f'> {log_path}']
+            executable = '/bin/bash'
+        if ssh_mode == SshMode.INTERACTIVE:
+            kwargs.setdefault('stdin', subprocess.PIPE)
+        return log_lib.run_with_log(' '.join(command),
+                                    log_path,
+                                    require_outputs=require_outputs,
+                                    stream_logs=stream_logs,
+                                    process_stream=process_stream,
+                                    shell=True,
+                                    executable=executable,
+                                    **kwargs)
+
+    @timeline.event
+    def rsync(
+        self,
+        source: str,
+        target: str,
+        *,
+        up: bool,
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        max_retry: int = 1,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Rsyncs with the exec helper as rsync's remote shell."""
+        self._rsync(source,
+                    target,
+                    node_destination=self.sandbox_id,
+                    up=up,
+                    rsh_option=self._exec_command(),
+                    log_path=log_path,
+                    stream_logs=stream_logs,
+                    max_retry=max_retry,
+                    get_remote_home_dir=self.get_remote_home_dir,
+                    timeout=timeout)
+
+
 class LocalProcessCommandRunner(CommandRunner):
     """Runner for local process commands."""
 

@@ -354,6 +354,7 @@ def _get_cluster_config_template(cloud):
         clouds.Yotta: 'yotta-ray.yml.j2',
         clouds.Mithril: 'mithril-ray.yml.j2',
         clouds.Daytona: 'daytona-ray.yml.j2',
+        clouds.Modal: 'modal-ray.yml.j2',
         clouds.Verda: 'verda-ray.yml.j2',
     }
     return cloud_to_template[type(cloud)]
@@ -2736,9 +2737,12 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
     @property
     def is_grpc_enabled_with_flag(self) -> bool:
         """Returns whether this handle has gRPC enabled and gRPC flag is set."""
+        # Modal clusters are reached through exec, which cannot carry the
+        # gRPC tunnel; they use the command-runner path, as Slurm does.
         return (env_options.Options.ENABLE_GRPC.get() and
                 self.is_grpc_enabled and
-                not isinstance(self.launched_resources.cloud, clouds.Slurm))
+                not isinstance(self.launched_resources.cloud,
+                               (clouds.Slurm, clouds.Modal)))
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-compatible dict."""

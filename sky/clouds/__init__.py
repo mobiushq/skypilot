@@ -25,6 +25,7 @@ from sky.clouds.ibm import IBM
 from sky.clouds.kubernetes import Kubernetes
 from sky.clouds.lambda_cloud import Lambda
 from sky.clouds.mithril import Mithril
+from sky.clouds.modal import Modal
 from sky.clouds.nebius import Nebius
 from sky.clouds.oci import OCI
 from sky.clouds.paperspace import Paperspace
@@ -72,6 +73,7 @@ __all__ = [
     'Hyperbolic',
     'Mithril',
     'Daytona',
+    'Modal',
     'Seeweb',
     'Yotta',
     # Utility functions

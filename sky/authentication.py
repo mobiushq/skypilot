@@ -559,6 +559,20 @@ def setup_daytona_authentication(config: Dict[str, Any]) -> Dict[str, Any]:
     return configure_ssh_info(config)
 
 
+def setup_modal_authentication(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Sets up authentication for Modal.
+
+    Modal clusters are reached through `Sandbox.exec`, not SSH, so no key is
+    registered anywhere. A local key pair is still generated because
+    SkyPilot's cluster config expects one.
+    """
+    _, public_key_path = auth_utils.get_or_generate_keys()
+    config.setdefault('auth', {})
+    config['auth']['ssh_user'] = 'root'
+    config['auth']['ssh_public_key'] = public_key_path
+    return configure_ssh_info(config)
+
+
 def setup_seeweb_authentication(config: Dict[str, Any]) -> Dict[str, Any]:
     """Registers the public key with Seeweb and notes the remote name."""
     # 1. local key pair

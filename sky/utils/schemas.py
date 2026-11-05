@@ -2410,6 +2410,20 @@ def get_config_schema():
                 },
             }
         },
+        'modal': {
+            'type': 'object',
+            'required': [],
+            'additionalProperties': False,
+            'properties': {
+                'ttl_minutes': {
+                    'type': 'integer',
+                    'minimum': 0,
+                },
+                'environment': {
+                    'type': 'string',
+                },
+            }
+        },
         'vast': {
             'type': 'object',
             'required': [],

@@ -693,6 +693,8 @@ OVERRIDEABLE_CONFIG_KEYS_IN_TASK: List[Tuple[str, ...]] = [
     ('gcp', 'placement_policy'),
     ('daytona', 'ttl_minutes'),
     ('daytona', 'preview_url_expires_seconds'),
+    ('modal', 'ttl_minutes'),
+    ('modal', 'environment'),
     ('vast', 'datacenter_only'),
     ('vast', 'create_instance_kwargs'),
     ('slurm', 'sbatch_options'),
@@ -908,7 +910,7 @@ ALL_CLOUDS = ('aws', 'azure', 'gcp', 'ibm', 'lambda', 'scp', 'oci',
               'kubernetes', 'runpod', 'vast', 'vsphere', 'cudo', 'fluidstack',
               'paperspace', 'primeintellect', 'do', 'nebius', 'ssh', 'slurm',
               'hyperbolic', 'seeweb', 'shadeform', 'yotta', 'mithril', 'verda',
-              'daytona')
+              'daytona', 'modal')
 # END constants used for service catalog.
 
 # The user ID of the SkyPilot system.
