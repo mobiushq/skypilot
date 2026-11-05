@@ -2410,6 +2410,18 @@ def get_config_schema():
                 },
             }
         },
+        'modal': {
+            'type': 'object',
+            'required': [],
+            'additionalProperties': False,
+            'properties': {
+                'timeout_minutes': {
+                    'type': 'integer',
+                    'minimum': 1,
+                    'maximum': 24 * 60,
+                },
+            }
+        },
         'vast': {
             'type': 'object',
             'required': [],

@@ -278,6 +278,7 @@ cloud_dependencies: Dict[str, List[str]] = {
     'seeweb': ['ecsapi==0.4.0'],
     'mithril': [],  # No dependencies needed for mithril
     'daytona': [],  # No dependencies needed for daytona
+    'modal': ['modal>=1.0.0'],
     'shadeform': [],  # No dependencies needed for shadeform
     'slurm': ['python-hostlist'],
     'yotta': [],  # No dependencies needed for Yotta
