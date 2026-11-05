@@ -2400,6 +2400,7 @@ def get_config_schema():
             'required': [],
             'additionalProperties': False,
             'properties': {
+                **_LABELS_SCHEMA,
                 'ttl_minutes': {
                     'type': 'integer',
                     'minimum': 0,

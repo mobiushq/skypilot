@@ -34,6 +34,11 @@ available_node_types:
       ImageId: {{image_id}}
       Preemptible: {{use_spot}}
       TtlMinutes: {{ttl_minutes}}
+      Labels:
+        skypilot-user: {{ user|tojson }}
+        {%- for label_key, label_value in labels.items() %}
+        {{ label_key|tojson }}: {{ label_value|tojson }}
+        {%- endfor %}
 
 head_node_type: ray_head_default
 

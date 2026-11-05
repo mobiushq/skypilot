@@ -37,13 +37,18 @@ MEMORY_PER_GPU_GIB = 100
 CONSUMER_MEMORY_PER_GPU_GIB = 50
 
 # Maps Daytona GPU type identifiers to SkyPilot accelerator names,
-# manufacturer and GPU memory (GiB). B200 is intentionally absent: it is
-# priced on the rate card ahead of launch and not yet orderable.
+# manufacturer and GPU memory (GiB).
 GPU_TYPES: Dict[str, Dict[str, Any]] = {
     'B300': {
         'acc_name': 'B300',
         'manufacturer': 'NVIDIA',
         'gpu_memory_gb': 288,
+        'memory_per_gpu': MEMORY_PER_GPU_GIB,
+    },
+    'B200': {
+        'acc_name': 'B200',
+        'manufacturer': 'NVIDIA',
+        'gpu_memory_gb': 186,
         'memory_per_gpu': MEMORY_PER_GPU_GIB,
     },
     'H200': {
