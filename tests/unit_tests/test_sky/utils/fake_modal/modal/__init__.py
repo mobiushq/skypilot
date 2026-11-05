@@ -3,8 +3,9 @@
 Tests put this directory on PYTHONPATH so the real exec helper, running as its
 own process, imports it as `modal`. It follows the signature and behavior of
 modal 1.6.3, including the ones a caller can get wrong: text mode by default,
-a 2**16 byte limit on arguments, -1 from wait() when the deadline passes, and
-errors from from_id() and exec() rather than from a later call.
+a 2**16 byte limit on arguments, -1 from wait() when the deadline passes,
+output that can outlast the command, and errors from from_id() and exec()
+rather than from a later call.
 
 The sandbox ID selects a failure:
     sb-gone: from_id() raises NotFoundError.
@@ -14,6 +15,7 @@ The sandbox ID selects a failure:
 """
 import json
 import os
+import queue
 import signal
 import subprocess
 import threading
@@ -25,15 +27,27 @@ _ARG_MAX_BYTES = 2**16
 
 
 class _Reader:
+    """Output that the server has already buffered, as Modal does.
+
+    A command can exit with its output still undelivered.
+    """
 
     def __init__(self, pipe, text, on_first_chunk=None):
-        self._pipe = pipe
         self._text = text
         self._on_first_chunk = on_first_chunk
+        self._chunks = queue.Queue()
+        threading.Thread(target=self._buffer, args=(pipe,), daemon=True).start()
+
+    def _buffer(self, pipe):
+        while True:
+            chunk = pipe.read1(64 * 1024)
+            self._chunks.put(chunk)
+            if not chunk:
+                return
 
     def __iter__(self):
         while True:
-            chunk = self._pipe.read1(64 * 1024)
+            chunk = self._chunks.get()
             if not chunk:
                 return
             yield chunk.decode('utf-8') if self._text else chunk
