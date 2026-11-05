@@ -12,6 +12,9 @@ The sandbox ID selects a failure:
     sb-unauthorized: from_id() raises AuthError.
     sb-hang: from_id() never returns.
     sb-drop: output and wait() raise after the first chunk of output.
+
+Sandbox.create starts a real sandbox for the end-to-end launch test; see
+_sandbox_process.py.
 """
 import json
 import os
@@ -21,6 +24,7 @@ import subprocess
 import threading
 import time
 
+from . import _sandbox_process
 from . import exception
 
 _ARG_MAX_BYTES = 2**16
@@ -116,6 +120,42 @@ class _Process:
             os.write(1, chunk.encode() if isinstance(chunk, str) else chunk)
 
 
+class _App:
+
+    def __init__(self, name):
+        self.name = name
+        self.app_id = f'ap-{name}'
+
+
+class App:
+
+    @staticmethod
+    def lookup(name, environment_name=None, create_if_missing=False):
+        del environment_name
+        marker = os.path.join(os.environ['FAKE_MODAL_STATE'], 'apps', name)
+        if not os.path.exists(marker):
+            if not create_if_missing:
+                raise exception.NotFoundError(f'App {name} not found')
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            with open(marker, 'w', encoding='utf-8'):
+                pass
+        return _App(name)
+
+
+class Image:
+
+    def __init__(self, name, commands=()):
+        self.name = name
+        self.commands = list(commands)
+
+    @staticmethod
+    def from_registry(name):
+        return Image(name)
+
+    def run_commands(self, *commands):
+        return Image(self.name, self.commands + list(commands))
+
+
 class Sandbox:
 
     def __init__(self, sandbox_id):
@@ -131,6 +171,24 @@ class Sandbox:
         if sandbox_id == 'sb-hang':
             threading.Event().wait()
         return Sandbox(sandbox_id)
+
+    @staticmethod
+    def create(*args, app=None, image=None, tags=None, timeout=300, **kwargs):
+        image_dir = _sandbox_process.build_image(image.commands)
+        sandbox_id = _sandbox_process.create(list(args), image_dir, tags or {},
+                                             app.app_id, timeout, kwargs)
+        return Sandbox(sandbox_id)
+
+    @staticmethod
+    def list(app_id=None, tags=None):
+        for sandbox_id in _sandbox_process.list_ids(app_id, tags or {}):
+            yield Sandbox(sandbox_id)
+
+    def poll(self):
+        return _sandbox_process.poll(self.object_id)
+
+    def terminate(self):
+        _sandbox_process.terminate(self.object_id)
 
     def exec(self,
              *args,
@@ -159,6 +217,14 @@ class Sandbox:
                     'text': text,
                     'pty': pty,
                 }) + '\n')
+        if _sandbox_process.is_process_sandbox(self.object_id):
+            try:
+                args = _sandbox_process.exec_args(self.object_id, args, workdir,
+                                                  env)
+            except ProcessLookupError as e:
+                raise exception.NotFoundError(str(e)) from e
+            workdir = None
+            env = None
         popen = subprocess.Popen(  # pylint: disable=consider-using-with
             args,
             stdin=subprocess.PIPE,
