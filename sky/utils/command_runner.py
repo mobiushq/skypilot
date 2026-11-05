@@ -2129,7 +2129,7 @@ class ModalCommandRunner(CommandRunner):
         max_retry: int = 1,
         timeout: Optional[int] = None,
     ) -> None:
-        """Uses 'rsync' tunnelled over Sandbox.exec to sync 'source' to 'target'.
+        """Uses rsync tunnelled over Sandbox.exec to sync 'source' to 'target'.
 
         Args:
             source: The source path.

@@ -176,6 +176,26 @@ def test_helper_handles_non_blocking_pipes(exec_log):
     assert received == payload
 
 
+def test_helper_keeps_output_for_a_slow_reader(exec_log):
+    # The command exits with output still undelivered, and the local reader then
+    # pauses for longer than the helper waits on an idle stream.
+    del exec_log
+    size = 1024 * 1024
+    proc = subprocess.Popen(  # pylint: disable=consider-using-with
+        [
+            sys.executable,
+            str(_HELPER_DIR / 'exec_helper.py'), '--sandbox-id', 'sb-live',
+            '--', '/bin/bash', '-c', f'head -c {size} /dev/zero'
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE)
+    time.sleep(12)
+    received = proc.stdout.read()
+    proc.stdout.close()
+    assert proc.wait(timeout=30) == 0
+    assert len(received) == size
+
+
 def test_helper_reports_sandbox_deadline_as_124(exec_log):
     del exec_log
     proc = subprocess.run([

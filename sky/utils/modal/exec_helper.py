@@ -33,7 +33,7 @@ _POLL_SECONDS = 0.05
 # A daemon started by the command (e.g. `ray start`) can inherit stdout and keep
 # the stream open after the command has exited. Once it has exited, stop reading
 # after this many seconds with no new output.
-_OUTPUT_IDLE_SECONDS_AFTER_EXIT = 5.0
+_OUTPUT_IDLE_SECONDS_AFTER_EXIT = 10.0
 # How long to wait for the exit status after a stream has failed.
 _EXIT_WAIT_SECONDS_AFTER_ERROR = 5.0
 
@@ -82,16 +82,25 @@ class _Session:
     def __init__(self, process: Any) -> None:
         self._process = process
         self._last_output = time.monotonic()
+        # Output waiting on a slow local reader is not idle, so must not be cut.
+        self._num_writing = 0
+        self._lock = threading.Lock()
         self.error: Optional[BaseException] = None
         self.exit_status: Optional[int] = None
 
     def _pump_output(self, stream: Any, fd: int) -> None:
         try:
             for chunk in stream:
-                self._last_output = time.monotonic()
                 if isinstance(chunk, str):
                     chunk = chunk.encode('utf-8')
-                _write_all(fd, chunk)
+                with self._lock:
+                    self._num_writing += 1
+                try:
+                    _write_all(fd, chunk)
+                finally:
+                    with self._lock:
+                        self._num_writing -= 1
+                        self._last_output = time.monotonic()
         except BrokenPipeError:
             # Our reader went away, e.g. `| head`.
             pass
@@ -149,9 +158,11 @@ class _Session:
             return None
 
         while any(thread.is_alive() for thread in outputs):
-            idle = time.monotonic() - self._last_output
-            if idle > _OUTPUT_IDLE_SECONDS_AFTER_EXIT:
-                break
+            with self._lock:
+                idle = time.monotonic() - self._last_output
+                if (not self._num_writing and
+                        idle > _OUTPUT_IDLE_SECONDS_AFTER_EXIT):
+                    break
             time.sleep(_POLL_SECONDS)
         return self.exit_status
 
