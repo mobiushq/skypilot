@@ -34,24 +34,27 @@ MEMORY_GIB_USD_PER_SECOND = 0.00000222
 SANDBOX_CPU_MEMORY_MULTIPLIER = 3
 
 # Modal GPU type -> (SkyPilot accelerator name, GPU memory GiB, vCPUs per
-# GPU, memory GiB per GPU, GPU counts offered). One Modal CPU core is two
-# vCPUs.
-GPU_TYPES: Dict[str, Tuple[str, int, int, int, Tuple[int, ...]]] = {
-    'B300': ('B300', 288, 8, 32, (1, 2, 4, 8)),
-    'B200': ('B200', 180, 8, 32, (1, 2, 4, 8)),
-    'H200': ('H200', 141, 8, 32, (1, 2, 4, 8)),
-    'H100': ('H100', 80, 8, 32, (1, 2, 4, 8)),
-    'RTX-PRO-6000': ('RTXPRO6000', 96, 8, 32, (1, 2, 4, 8)),
-    'A100-80GB': ('A100-80GB', 80, 8, 32, (1, 2, 4, 8)),
-    'A100-40GB': ('A100', 40, 8, 32, (1, 2, 4, 8)),
-    'L40S': ('L40S', 48, 8, 32, (1, 2, 4, 8)),
-    'A10': ('A10', 24, 4, 16, (1, 2, 4)),
-    'L4': ('L4', 24, 4, 16, (1, 2, 4, 8)),
-    'T4': ('T4', 16, 4, 16, (1, 2, 4, 8)),
+# GPU, memory GiB per GPU, most GPUs per sandbox). One Modal CPU core is two
+# vCPUs. Modal takes any GPU count up to the maximum.
+GPU_TYPES: Dict[str, Tuple[str, int, int, int, int]] = {
+    'B300': ('B300', 288, 8, 32, 8),
+    'B200': ('B200', 180, 8, 32, 8),
+    'H200': ('H200', 141, 8, 32, 8),
+    'H100': ('H100', 80, 8, 32, 8),
+    'RTX-PRO-6000': ('RTXPRO6000', 96, 8, 32, 8),
+    'A100-80GB': ('A100-80GB', 80, 8, 32, 8),
+    'A100-40GB': ('A100', 40, 8, 32, 8),
+    'L40S': ('L40S', 48, 8, 32, 8),
+    'A10': ('A10', 24, 4, 16, 4),
+    'L4': ('L4', 24, 4, 16, 8),
+    'T4': ('T4', 16, 4, 16, 8),
 }
+# Other SkyPilot names for a Modal GPU type: Modal's A10 is the A10G that
+# AWS sells, and SkyPilot users ask for it by that name.
+ALIASES: Dict[str, str] = {'A10G': 'A10'}
 
 # CPU-only sandbox shapes: (vCPUs, memory GiB).
-CPU_SHAPES = ((2, 8), (4, 16), (8, 32), (16, 64))
+CPU_SHAPES = ((2, 8), (4, 16), (8, 32), (16, 64), (32, 128), (64, 256))
 
 # Modal places sandboxes itself; pinning a region costs extra and is not
 # offered here.
@@ -97,9 +100,12 @@ def create_catalog(output_path: str = 'modal/vms.csv') -> None:
             'Region',
             'GpuInfo',
         ])
-        for gpu_type, (acc_name, gpu_memory, vcpus_per_gpu, memory_per_gpu,
-                       counts) in GPU_TYPES.items():
-            for count in counts:
+        gpu_types = [(gpu_type, *spec) for gpu_type, spec in GPU_TYPES.items()]
+        gpu_types += [(gpu_type, alias, *GPU_TYPES[gpu_type][1:])
+                      for alias, gpu_type in ALIASES.items()]
+        for (gpu_type, acc_name, gpu_memory, vcpus_per_gpu, memory_per_gpu,
+             max_count) in gpu_types:
+            for count in range(1, max_count + 1):
                 vcpus = vcpus_per_gpu * count
                 memory = memory_per_gpu * count
                 writer.writerow([

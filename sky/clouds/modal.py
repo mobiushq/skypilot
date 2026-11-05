@@ -38,9 +38,6 @@ class Modal(clouds.Cloud):
         clouds.CloudImplementationFeatures.AUTO_TERMINATE:
             (f'Auto-terminate is not supported on {_REPR}. Use '
              '`modal.ttl_minutes` to bound a cluster\'s lifetime.'),
-        clouds.CloudImplementationFeatures.AUTODOWN:
-            (f'Auto-down is not supported on {_REPR}. Use '
-             '`modal.ttl_minutes` to bound a cluster\'s lifetime.'),
         clouds.CloudImplementationFeatures.MULTI_NODE:
             (f'Multi-node clusters are not supported on {_REPR}. '
              'Each cluster runs on one sandbox.'),
@@ -166,9 +163,20 @@ class Modal(clouds.Cloud):
         return cls._check_credentials()
 
     @classmethod
+    def get_credentials_path(cls) -> str:
+        return modal_utils.get_credentials_path()
+
+    @classmethod
     def get_credential_file_mounts(cls) -> Dict[str, str]:
-        # Nothing on the cluster calls Modal, so no credentials are copied.
-        return {}
+        # Autodown on the sandbox and managed-job controllers call Modal, so
+        # they get the token in use, from a private file.
+        try:
+            token_path = modal_utils.write_credentials_file()
+        except ImportError:  # the Modal SDK is not installed
+            return {}
+        if token_path is None:
+            return {}
+        return {cls.get_credentials_path(): token_path}
 
     def __repr__(self):
         return self._REPR

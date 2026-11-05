@@ -34,7 +34,8 @@ def run_instances(
     cluster_name_on_cloud: str,
     config: common.ProvisionConfig,
 ) -> common.ProvisionRecord:
-    """Creates the cluster's sandbox, or reuses the running one."""
+    """Creates the cluster's sandbox, or reuses the running one, and waits
+    until it runs commands."""
     del cluster_name  # unused
     if config.count > 1:
         raise utils.ModalError('Modal does not support multi-node clusters '
@@ -45,6 +46,7 @@ def run_instances(
         sandbox_id = existing[0].object_id
         logger.debug(f'Reusing sandbox {sandbox_id} for cluster '
                      f'{cluster_name_on_cloud}')
+        utils.wait_for_sandbox_running(existing[0])
         return common.ProvisionRecord(
             provider_name=PROVIDER_NAME,
             cluster_name=cluster_name_on_cloud,
@@ -60,7 +62,7 @@ def run_instances(
     instance_type = node_config.get('InstanceType')
     if not instance_type:
         raise utils.ModalError('InstanceType is not set in node_config.')
-    sandbox_id = utils.create_sandbox(
+    sandbox = utils.create_sandbox(
         cluster_name_on_cloud=cluster_name_on_cloud,
         instance_type=instance_type,
         cpus=float(node_config['Cpus']),
@@ -69,6 +71,8 @@ def run_instances(
         ttl_minutes=node_config.get('TtlMinutes') or None,
         environment=environment,
     )
+    sandbox_id = sandbox.object_id
+    utils.wait_for_sandbox_running(sandbox)
     logger.debug(f'Created sandbox {sandbox_id} for cluster '
                  f'{cluster_name_on_cloud}')
     return common.ProvisionRecord(
@@ -85,8 +89,7 @@ def run_instances(
 
 def wait_instances(region: str, cluster_name_on_cloud: str,
                    state: Optional[status_lib.ClusterStatus]) -> None:
-    """Sandbox.create returns once the sandbox is scheduled; exec waits for
-    it to start, so there is nothing to wait for here."""
+    """run_instances() waits for the sandbox to run a command; no-op."""
     del region, cluster_name_on_cloud, state  # unused
 
 

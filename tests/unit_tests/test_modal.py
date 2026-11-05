@@ -32,6 +32,21 @@ class _NotFoundError(Exception):
     pass
 
 
+class _AlreadyExistsError(Exception):
+    pass
+
+
+class _Process:
+    """A finished `Sandbox.exec` process."""
+
+    def __init__(self, returncode):
+        self.returncode = None
+        self._returncode = returncode
+
+    def wait(self):
+        self.returncode = self._returncode
+
+
 class FakeSandbox:
 
     def __init__(self, fake, sandbox_id, tags, kwargs):
@@ -40,11 +55,20 @@ class FakeSandbox:
         self.tags = dict(tags)
         self.kwargs = kwargs
         self.exit_code = None
+        self.execs = []
 
     def poll(self):
         return self.exit_code
 
+    def exec(self, *args, timeout=None):
+        self.execs.append((args, timeout))
+        if self.exit_code is not None or self._fake.probe is None:
+            raise RuntimeError('sandbox exited')
+        return _Process(self._fake.probe)
+
     def terminate(self):
+        if self._fake.sandboxes.get(self.object_id) is None:
+            raise _NotFoundError(self.object_id)
         self.exit_code = 137
 
 
@@ -66,6 +90,8 @@ class FakeModal:
         self.sandboxes = {}
         self.apps = {}
         self.create_calls = []
+        self.probe = 0  # the start probe's exit code; None: exec fails
+        self.token = {}
         fake = self
 
         class App:
@@ -93,11 +119,28 @@ class FakeModal:
                     inspect.signature(real_modal.Sandbox.create).bind(
                         *args, **kwargs)
                 fake.create_calls.append((args, kwargs))
+                if any(sb.app_id == kwargs['app'].app_id and sb.kwargs.get(
+                        'name') == kwargs.get('name') and sb.exit_code is None
+                       for sb in fake.sandboxes.values()):
+                    raise _AlreadyExistsError(kwargs.get('name'))
                 sandbox_id = f'sb-{len(fake.sandboxes) + 1}'
                 sandbox = FakeSandbox(fake, sandbox_id, kwargs['tags'], kwargs)
                 sandbox.app_id = kwargs['app'].app_id
                 fake.sandboxes[sandbox_id] = sandbox
                 return sandbox
+
+            @staticmethod
+            def from_name(app_name, name, environment_name=None):
+                if real_modal is not None:
+                    inspect.signature(real_modal.Sandbox.from_name).bind(
+                        app_name, name, environment_name=environment_name)
+                app = fake.apps[(app_name, environment_name)]
+                for sandbox in fake.sandboxes.values():
+                    if (sandbox.app_id == app.app_id and
+                            sandbox.kwargs.get('name') == name and
+                            sandbox.exit_code is None):
+                        return sandbox
+                raise _NotFoundError(name)
 
             @staticmethod
             def list(app_id=None, tags=None):
@@ -114,7 +157,9 @@ class FakeModal:
         self.App = App
         self.Image = Image
         self.Sandbox = Sandbox
-        self.exception = mock.Mock(NotFoundError=_NotFoundError)
+        self.exception = mock.Mock(NotFoundError=_NotFoundError,
+                                   AlreadyExistsError=_AlreadyExistsError)
+        self.config = mock.Mock(config=mock.Mock(get=fake.token.get))
 
 
 @pytest.fixture
@@ -183,7 +228,13 @@ class TestModalLifecycle:
         assert kwargs['cpu'] == 2  # 4 vCPUs are 2 Modal cores.
         assert kwargs['memory'] == 16 * 1024
         assert kwargs['timeout'] == 20 * 60
-        assert kwargs['tags'] == {modal_utils.CLUSTER_TAG: 'c-abcd'}
+        assert kwargs['name'] == 'c-abcd'
+        assert kwargs['tags'] == {
+            modal_utils.CLUSTER_TAG: 'c-abcd',
+            modal_utils.MANAGED_TAG: 'true'
+        }
+        sandbox = fake_modal.sandboxes[sandbox_id]
+        assert [args for args, _ in sandbox.execs] == [('true',)]
         assert kwargs['image'].tag == modal_utils.DEFAULT_IMAGE
         assert kwargs['image'].commands == modal_utils.IMAGE_SETUP_COMMANDS
 
@@ -246,6 +297,36 @@ class TestModalLifecycle:
         assert 'gpu' not in kwargs
         assert kwargs['image'].tag == 'python:3.11-slim'
 
+    def test_create_is_idempotent_by_name(self, fake_modal):
+        # A launch interrupted after create, before SkyPilot saw the ID.
+        first = modal_utils.create_sandbox('c-abcd', '1x-T4', 4, 16, None, None)
+        again = modal_utils.create_sandbox('c-abcd', '1x-T4', 4, 16, None, None)
+        assert again is first
+        assert len(fake_modal.sandboxes) == 1
+
+    def test_name_is_free_again_after_teardown(self, fake_modal):
+        modal_instance.run_instances('global', 'c', 'c-abcd',
+                                     _provision_config())
+        modal_instance.terminate_instances('c-abcd')
+        record = modal_instance.run_instances('global', 'c', 'c-abcd',
+                                              _provision_config())
+        assert record.created_instance_ids == ['sb-2']
+
+    @pytest.mark.parametrize('probe, match', [(None, 'did not start'),
+                                              (1, 'exited with code 1')])
+    def test_start_probe_failure_fails_the_launch(self, fake_modal, probe,
+                                                  match):
+        fake_modal.probe = probe
+        with pytest.raises(modal_utils.ModalError, match=match):
+            modal_instance.run_instances('global', 'c', 'c-abcd',
+                                         _provision_config())
+
+    def test_terminate_tolerates_a_gone_sandbox(self, fake_modal):
+        record = modal_instance.run_instances('global', 'c', 'c-abcd',
+                                              _provision_config())
+        sandbox = fake_modal.sandboxes.pop(record.head_instance_id)
+        modal_utils.terminate_sandbox(sandbox)
+
     def test_multi_node_rejected(self, fake_modal):
         with pytest.raises(modal_utils.ModalError):
             modal_instance.run_instances('global', 'c', 'c-abcd',
@@ -266,11 +347,14 @@ class TestModalCloud:
 
     def test_unsupported_features(self):
         features = modal_cloud.Modal._CLOUD_UNSUPPORTED_FEATURES  # pylint: disable=protected-access
-        for feature in ('STOP', 'MULTI_NODE', 'SPOT_INSTANCE', 'OPEN_PORTS',
-                        'AUTODOWN', 'HOST_CONTROLLERS'):
+        for feature in ('STOP', 'AUTOSTOP', 'MULTI_NODE', 'SPOT_INSTANCE',
+                        'OPEN_PORTS', 'HOST_CONTROLLERS'):
             assert getattr(clouds.CloudImplementationFeatures,
                            feature) in features
-        assert clouds.CloudImplementationFeatures.IMAGE_ID not in features
+        # Autodown runs on the sandbox with the mounted token.
+        for feature in ('IMAGE_ID', 'AUTODOWN'):
+            assert getattr(clouds.CloudImplementationFeatures,
+                           feature) not in features
 
     def test_catalog_is_bundled(self):
         assert catalog_common.get_bundled_catalog_path('modal/vms.csv')
@@ -285,6 +369,23 @@ class TestModalCloud:
         assert cost == pytest.approx(0.5904 + 3 * 3600 *
                                      (2 * 0.0000131 + 16 * 0.00000222),
                                      rel=1e-4)
+
+    @pytest.mark.parametrize('acc, instance_type, gpu', [
+        ('H100:3', '3x-H100', 'H100:3'),
+        ('A10G:1', '1x-A10G', 'A10'),
+        ('A10:4', '4x-A10', 'A10:4'),
+    ])
+    def test_any_gpu_count_up_to_the_max(self, acc, instance_type, gpu):
+        r = resources_lib.Resources(infra='modal', accelerators=acc)
+        feasible = modal_cloud.Modal()._get_feasible_launchable_resources(r)  # pylint: disable=protected-access
+        (chosen,) = feasible.resources_list
+        assert chosen.instance_type == instance_type
+        assert modal_utils.modal_gpu(instance_type) == gpu
+
+    def test_a10_stops_at_four(self):
+        r = resources_lib.Resources(infra='modal', accelerators='A10:5')
+        feasible = modal_cloud.Modal()._get_feasible_launchable_resources(r)  # pylint: disable=protected-access
+        assert not feasible.resources_list
 
     def test_spot_is_infeasible(self):
         r = resources_lib.Resources(infra='modal',
@@ -304,6 +405,49 @@ class TestModalCloud:
         monkeypatch.setenv(modal_utils.ENV_TOKEN_SECRET, 'as-x')
         assert modal_cloud.Modal._check_credentials() == (True, None)  # pylint: disable=protected-access
 
+    def test_token_file_for_autodown(self, fake_modal, monkeypatch, tmp_path):
+        generated = tmp_path / 'generated' / 'modal.toml'
+        monkeypatch.setattr(modal_utils, '_GENERATED_CREDENTIALS_PATH',
+                            str(generated))
+        assert not modal_cloud.Modal.get_credential_file_mounts()
+        fake_modal.token.update(token_id='ak-1', token_secret='as-1')
+        mounts = modal_cloud.Modal.get_credential_file_mounts()
+        assert mounts == {'~/.modal.toml': str(generated)}
+        assert generated.stat().st_mode & 0o777 == 0o600
+        assert _read_toml(generated) == {
+            'skypilot': {
+                'token_id': 'ak-1',
+                'token_secret': 'as-1',
+                'active': True
+            }
+        }
+
+    @pytest.mark.parametrize('remote', ['1', None])
+    def test_autodown_on_the_sandbox_reads_the_token(self, fake_modal,
+                                                     monkeypatch, tmp_path,
+                                                     remote):
+        # The SDK ignores ~/.modal.toml inside Modal containers.
+        generated = tmp_path / 'modal.toml'
+        monkeypatch.setattr(modal_utils, '_GENERATED_CREDENTIALS_PATH',
+                            str(generated))
+        fake_modal.token.update(token_id='ak-1', token_secret='as-1')
+        modal_utils.write_credentials_file()
+        monkeypatch.setattr(modal_utils, 'CREDENTIALS_PATH', str(generated))
+        for var in (modal_utils.ENV_TOKEN_ID, modal_utils.ENV_TOKEN_SECRET,
+                    'MODAL_IS_REMOTE'):
+            monkeypatch.delenv(var, raising=False)
+        if remote:
+            monkeypatch.setenv('MODAL_IS_REMOTE', remote)
+        modal_instance.terminate_instances('c-abcd')
+        exported = (os.environ.get(modal_utils.ENV_TOKEN_ID),
+                    os.environ.get(modal_utils.ENV_TOKEN_SECRET))
+        assert exported == (('ak-1', 'as-1') if remote else (None, None))
+
+    def test_no_sdk_no_mounts(self, monkeypatch):
+        monkeypatch.setattr(modal_utils, 'write_credentials_file',
+                            mock.Mock(side_effect=ImportError('modal')))
+        assert not modal_cloud.Modal.get_credential_file_mounts()
+
     def test_deploy_variables(self):
         r = resources_lib.Resources(infra='modal/global',
                                     instance_type='1x-H100',
@@ -321,6 +465,16 @@ class TestModalCloud:
         assert variables['ttl_minutes'] == 45
         assert variables['modal_environment'] == 'staging'
         assert variables['image_id'] == 'pytorch/pytorch:latest'
+
+
+def _read_toml(path):
+    try:
+        import tomllib  # pylint: disable=import-outside-toplevel
+        with open(path, 'rb') as f:
+            return tomllib.load(f)
+    except ImportError:  # Python < 3.11
+        import toml  # pylint: disable=import-outside-toplevel
+        return toml.load(str(path))
 
 
 class TestModalExecHelper:
