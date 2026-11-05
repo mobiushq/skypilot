@@ -4,7 +4,9 @@ Provision, runtime setup, Ray, skylet, job submission, job status, logs and
 teardown all really run, in a sandbox that is a process tree in Linux namespaces
 on a local Ubuntu root filesystem (see fake_modal/modal/_sandbox_process.py).
 There are no Modal credentials and no calls to Modal. It says nothing about
-Modal's own runtime, such as Ray under gVisor.
+Modal's own runtime, such as Ray under gVisor. For autodown, the sandbox's
+runtime gets the fake SDK in place of the real one, and its calls reach the
+fake's control plane on the host (fake_modal/modal/_control.py).
 
 It needs root, the network (the cluster installs uv, Python and Ray) and about
 a minute of setup, so it runs only when given a root filesystem:
@@ -172,3 +174,16 @@ def test_cluster_goes_away_when_its_sandbox_ends(steps):
                'status_after_sandbox_ended')
     assert steps['status_after_sandbox_ended']['result'] == '[]'
     assert not steps['exec_after_sandbox_ended']['ok']
+
+
+def test_autodown_ends_the_sandbox_from_the_sandbox(steps):
+    _assert_ok(steps, 'launch_autodown', 'autodown_job', 'install_fake_sdk',
+               'set_autodown', 'autodown_ended_sandbox', 'control_plane_calls',
+               'status_after_autodown')
+    assert 'fake_modal' not in steps['install_fake_sdk']['result']
+    assert 'modal/__init__.py' in steps['install_fake_sdk']['result']
+    # Every call from the sandbox carried the mounted token.
+    calls = steps['control_plane_calls']['result']
+    assert "('terminate', 'ok')" in calls
+    assert 'AuthError' not in calls
+    assert steps['status_after_autodown']['result'] == '[]'

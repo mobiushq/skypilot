@@ -3,9 +3,12 @@
 Runs as its own process, against the fake Modal SDK, in a temporary HOME. Takes
 the path to write one JSON record per step to, and the path of its own stdout.
 """
+import base64
+import io
 import json
 import os
 import sys
+import tarfile
 import tempfile
 import time
 import traceback
@@ -23,6 +26,7 @@ from sky.utils import common_utils
 
 CLUSTER = 'e2e-modal'
 LOST_CLUSTER = 'e2e-modal-lost'
+AUTODOWN_CLUSTER = 'e2e-modal-autodown'
 # Over the 2**16 bytes that one Modal exec can carry.
 LARGE_SCRIPT_BYTES = 100 * 1024
 
@@ -97,8 +101,44 @@ def _in_sandbox(cluster: str, command: str) -> str:
     return output
 
 
+def _install_fake_sdk(cluster: str) -> str:
+    """Puts this fake in place of the modal package in the cluster's runtime.
+
+    The runtime installs the real SDK; autodown on the sandbox must call the
+    fake's control plane instead of Modal.
+    """
+    python = '~/skypilot-runtime/bin/python'
+    package = _in_sandbox(
+        cluster, f'{python} -c "import modal, os; '
+        'print(os.path.dirname(modal.__file__))"').strip()
+    assert package.endswith('/modal'), package
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode='w:gz') as tar:
+        tar.add(os.path.dirname(modal.__file__),
+                arcname='.',
+                filter=lambda info: None
+                if '__pycache__' in info.name else info)
+    encoded = base64.b64encode(archive.getvalue()).decode()
+    return _in_sandbox(
+        cluster, f'rm -rf {package} && mkdir {package} && '
+        f'echo {encoded} | base64 -d | tar -xz -C {package} && '
+        f'{python} -c "import modal; print(modal.__file__)"')
+
+
+def _wait_for_no_sandbox(cluster: str) -> str:
+    handle = global_user_state.get_handle_from_cluster_name(cluster)
+    deadline = time.time() + 300
+    while modal_utils.list_cluster_sandboxes(handle.cluster_name_on_cloud):
+        if time.time() > deadline:
+            raise TimeoutError(f'{cluster} still has its sandbox')
+        time.sleep(2)
+    return 'gone'
+
+
 def _main() -> None:
     assert 'fake_modal' in modal.__file__, modal.__file__
+    # Sandboxes created from here on get its URL in their environment.
+    os.environ['FAKE_MODAL_SERVER'], served = modal.serve_control_plane()
     global_user_state.add_or_update_user(
         models.User(id=common_utils.get_user_hash(), name='e2e'))
 
@@ -235,6 +275,25 @@ def _main() -> None:
         _step(
             'status_after_sandbox_ended',
             lambda: core.status(cluster_names=[LOST_CLUSTER],
+                                refresh=sky.StatusRefreshMode.FORCE))
+
+    # Autodown: the sandbox's skylet ends its own sandbox, through the SDK on
+    # the sandbox and the token mounted there.
+    auto, auto_job = _step(
+        'launch_autodown',
+        lambda: _launch(AUTODOWN_CLUSTER, _task('z', 'echo Z')))
+    if auto:
+        _step('autodown_job', lambda: _wait_for_job(auto_job, AUTODOWN_CLUSTER))
+        _step('install_fake_sdk', lambda: _install_fake_sdk(AUTODOWN_CLUSTER))
+        _step(
+            'set_autodown',
+            lambda: core.autostop(AUTODOWN_CLUSTER, idle_minutes=1, down=True))
+        _step('autodown_ended_sandbox',
+              lambda: _wait_for_no_sandbox(AUTODOWN_CLUSTER))
+        _step('control_plane_calls', lambda: list(served))
+        _step(
+            'status_after_autodown',
+            lambda: core.status(cluster_names=[AUTODOWN_CLUSTER],
                                 refresh=sky.StatusRefreshMode.FORCE))
 
 

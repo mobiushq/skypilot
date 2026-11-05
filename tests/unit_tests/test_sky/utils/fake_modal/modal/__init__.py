@@ -14,7 +14,8 @@ The sandbox ID selects a failure:
     sb-drop: output and wait() raise after the first chunk of output.
 
 Sandbox.create starts a real sandbox for the end-to-end launch test; see
-_sandbox_process.py.
+_sandbox_process.py. On such a sandbox, App.lookup, Sandbox.list, poll and
+terminate go to the test's control plane; see _control.py.
 """
 import json
 import os
@@ -24,7 +25,9 @@ import subprocess
 import threading
 import time
 
+from . import _control
 from . import _sandbox_process
+from . import config
 from . import exception
 
 _ARG_MAX_BYTES = 2**16
@@ -86,6 +89,7 @@ class _Process:
 
     def __init__(self, popen, text, timeout, drops):
         self._popen = popen
+        self.returncode = None
         self._timed_out = False
         self._dropped = threading.Event()
         on_first_chunk = self._drop if drops else None
@@ -111,9 +115,12 @@ class _Process:
                 raise ConnectionError('connection dropped')
             time.sleep(0.01)
         if self._timed_out:
-            return -1
-        returncode = self._popen.returncode
-        return 128 - returncode if returncode < 0 else returncode
+            self.returncode = -1
+        else:
+            returncode = self._popen.returncode
+            self.returncode = (128 -
+                               returncode if returncode < 0 else returncode)
+        return self.returncode
 
     def attach(self):
         for chunk in self.stdout:
@@ -131,6 +138,12 @@ class App:
 
     @staticmethod
     def lookup(name, environment_name=None, create_if_missing=False):
+        if _control.is_client():
+            _control.call('lookup_app',
+                          name=name,
+                          environment_name=environment_name,
+                          create_if_missing=create_if_missing)
+            return _App(name)
         del environment_name
         marker = os.path.join(os.environ['FAKE_MODAL_STATE'], 'apps', name)
         if not os.path.exists(marker):
@@ -173,7 +186,20 @@ class Sandbox:
         return Sandbox(sandbox_id)
 
     @staticmethod
+    def from_name(app_name, name, environment_name=None):
+        app = App.lookup(app_name, environment_name=environment_name)
+        sandbox_id = _sandbox_process.find_by_name(app.app_id, name)
+        if sandbox_id is None:
+            raise exception.NotFoundError(f'Sandbox {name} not found')
+        return Sandbox(sandbox_id)
+
+    @staticmethod
     def create(*args, app=None, image=None, tags=None, timeout=300, **kwargs):
+        name = kwargs.get('name')
+        if name is not None and _sandbox_process.find_by_name(app.app_id,
+                                                              name) is not None:
+            raise exception.AlreadyExistsError(
+                f'Sandbox with name {name!r} already exists')
         image_dir = _sandbox_process.build_image(image.commands)
         sandbox_id = _sandbox_process.create(list(args), image_dir, tags or {},
                                              app.app_id, timeout, kwargs)
@@ -181,13 +207,22 @@ class Sandbox:
 
     @staticmethod
     def list(app_id=None, tags=None):
-        for sandbox_id in _sandbox_process.list_ids(app_id, tags or {}):
+        if _control.is_client():
+            sandbox_ids = _control.call('list', app_id=app_id, tags=tags)
+        else:
+            sandbox_ids = _sandbox_process.list_ids(app_id, tags or {})
+        for sandbox_id in sandbox_ids:
             yield Sandbox(sandbox_id)
 
     def poll(self):
+        if _control.is_client():
+            return _control.call('poll', sandbox_id=self.object_id)
         return _sandbox_process.poll(self.object_id)
 
     def terminate(self):
+        if _control.is_client():
+            _control.call('terminate', sandbox_id=self.object_id)
+            return
         _sandbox_process.terminate(self.object_id)
 
     def exec(self,
@@ -234,3 +269,16 @@ class Sandbox:
             env=dict(os.environ, **(env or {})),
             start_new_session=True)
         return _Process(popen, text, timeout, drops=self.object_id == 'sb-drop')
+
+
+def serve_control_plane():
+    """Not Modal's: serves SDK calls from sandboxes. See _control.py."""
+    return _control.serve({
+        'lookup_app': lambda **kwargs: App.lookup(**kwargs).app_id,
+        'list': lambda app_id, tags: [
+            sandbox.object_id
+            for sandbox in Sandbox.list(app_id=app_id, tags=tags)
+        ],
+        'poll': lambda sandbox_id: Sandbox(sandbox_id).poll(),
+        'terminate': lambda sandbox_id: Sandbox(sandbox_id).terminate(),
+    })
