@@ -38,8 +38,6 @@ class Daytona(clouds.Cloud):
             (f'Auto-stop is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.AUTO_TERMINATE:
             (f'Auto-terminate is not supported on {_REPR}.'),
-        clouds.CloudImplementationFeatures.AUTODOWN:
-            (f'Auto-down is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.MULTI_NODE:
             (f'Multi-node clusters are not supported on {_REPR}. '
              'Sandboxes are isolated; each cluster runs on one sandbox.'),
@@ -170,6 +168,10 @@ class Daytona(clouds.Cloud):
     @classmethod
     def get_credential_file_mounts(cls) -> Dict[str, str]:
         credentials_path = cls.get_credentials_path()
+        # Same precedence as get_api_key(): the environment comes first.
+        env_key_path = daytona_utils.write_env_api_key_file()
+        if env_key_path is not None:
+            return {credentials_path: env_key_path}
         expanded_path = os.path.expanduser(credentials_path)
         if os.path.exists(expanded_path):
             return {credentials_path: expanded_path}
@@ -182,15 +184,12 @@ class Daytona(clouds.Cloud):
         self, resources: 'resources_lib.Resources'
     ) -> 'resources_utils.FeasibleResources':
         if resources.ports:
-            ports = resources_utils.port_ranges_to_set(resources.ports)
-            outside = sorted(p for p in ports
-                             if not daytona_utils.PREVIEW_PORT_MIN <= p <=
-                             daytona_utils.PREVIEW_PORT_MAX)
-            if outside:
+            reserved = daytona_utils.RESERVED_PORTS.intersection(
+                resources_utils.port_ranges_to_set(resources.ports))
+            if reserved:
                 return resources_utils.FeasibleResources(
-                    [], [], f'Daytona exposes only ports '
-                    f'{daytona_utils.PREVIEW_PORT_MIN}-'
-                    f'{daytona_utils.PREVIEW_PORT_MAX} (got {outside}).')
+                    [], [], f'Ports {sorted(reserved)} are reserved by '
+                    'Daytona sandboxes.')
         if resources.instance_type is not None:
             assert resources.is_launchable(), resources
             # Instance type already encodes the accelerator on Daytona.
