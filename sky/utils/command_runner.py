@@ -2,6 +2,7 @@
 import enum
 import fcntl
 import hashlib
+import json
 import os
 import pathlib
 import pty
@@ -81,6 +82,8 @@ RSYNC_NO_OWNER_NO_GROUP_OPTION = '--no-owner --no-group'
 
 _HASH_MAX_LENGTH = 10
 _DEFAULT_CONNECT_TIMEOUT = 30
+# Must match ENV_VAR in sky/utils/modal/exec_helper.py.
+_MODAL_EXEC_ENV_VAR = 'SKYPILOT_MODAL_EXEC_ENV'
 
 DEFAULT_SSH_CONTROL_NAME = '__default__'
 
@@ -1928,6 +1931,260 @@ class KubernetesCommandRunner(CommandRunner):
             # only need to do this when ~ is at the beginning of the path.
             get_remote_home_dir=self.get_remote_home_dir,
             timeout=timeout)
+
+
+class ModalCommandRunner(CommandRunner):
+    """Runner for Modal sandboxes.
+
+    A sandbox has no SSH and no open ports. Everything goes through
+    `Sandbox.exec`: a local helper process (sky/utils/modal/exec_helper.py)
+    plays the part `kubectl exec` plays for KubernetesCommandRunner, so logging,
+    timeouts and rsync's `-e` transport all work the same way.
+
+    Example Usage:
+        runner = ModalCommandRunner((sandbox_id,))
+        runner.run('ls -l')
+        runner.rsync(source, target, up=True)
+    """
+
+    # Modal rejects a command whose arguments total more than 2**16 bytes.
+    # Leave room for the rest of what _get_command_to_run wraps around it.
+    _MAX_INLINE_COMMAND_LENGTH = 60 * 1024
+    _HELPER_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                               'modal')
+    # Give the local timeout the chance to fire first, so callers see the
+    # subprocess.TimeoutExpired they expect. The sandbox's deadline is there to
+    # end the command, which killing the local helper cannot do.
+    _REMOTE_TIMEOUT_MARGIN_SECONDS = 5
+
+    def __init__(self, node: Tuple[str, ...], **kwargs):
+        """Initialize ModalCommandRunner.
+
+        Args:
+            node: A tuple whose first item is the sandbox's Modal object ID.
+        """
+        del kwargs  # SSH credentials, which do not apply.
+        super().__init__(node)
+        self.sandbox_id = node[0]
+
+    @property
+    def node_id(self) -> str:
+        return self.sandbox_id
+
+    def max_inline_command_length(self) -> int:
+        return self._MAX_INLINE_COMMAND_LENGTH
+
+    def port_forward_command(
+            self,
+            port_forward: List[Tuple[int, int]],
+            connect_timeout: int = 1,
+            ssh_mode: SshMode = SshMode.INTERACTIVE) -> List[str]:
+        raise NotImplementedError(
+            'Modal sandboxes do not support port forwarding.')
+
+    def _helper_command(self,
+                        connect_timeout: int,
+                        timeout: Optional[int] = None,
+                        pty_mode: bool = False) -> List[str]:
+        command = [
+            sys.executable,
+            os.path.join(self._HELPER_DIR, 'exec_helper.py'),
+            '--sandbox-id',
+            self.sandbox_id,
+            '--connect-timeout',
+            str(connect_timeout),
+        ]
+        if timeout is not None:
+            command += [
+                '--timeout',
+                str(int(timeout) + self._REMOTE_TIMEOUT_MARGIN_SECONDS)
+            ]
+        if pty_mode:
+            command.append('--pty')
+        return command + ['--']
+
+    @timeline.event
+    @context_utils.cancellation_guard
+    def run(
+            self,
+            cmd: Union[str, List[str]],
+            *,
+            port_forward: Optional[List[int]] = None,
+            require_outputs: bool = False,
+            # Advanced options.
+            log_path: str = os.devnull,
+            # If False, do not redirect stdout/stderr to optimize performance.
+            process_stream: bool = True,
+            stream_logs: bool = True,
+            ssh_mode: SshMode = SshMode.NON_INTERACTIVE,
+            separate_stderr: bool = False,
+            connect_timeout: Optional[int] = None,
+            source_bashrc: bool = False,
+            skip_num_lines: int = 0,
+            run_in_background: bool = False,
+            env: Optional[Dict[str, str]] = None,
+            **kwargs) -> Union[int, Tuple[int, str, str]]:
+        """Runs 'cmd' in the sandbox with Sandbox.exec.
+
+        Args:
+            cmd: The command to run.
+            port_forward: Must be None; Modal has no port forwarding.
+
+            Advanced options:
+
+            require_outputs: Whether to return the stdout/stderr of the command.
+            log_path: Redirect stdout/stderr to the log_path.
+            stream_logs: Stream logs to the stdout/stderr.
+            ssh_mode: The mode to use. LOGIN attaches a terminal, and
+                INTERACTIVE keeps stdin open. See SSHMode for more details.
+            separate_stderr: Whether to separate stderr from stdout.
+            connect_timeout: timeout in seconds for reaching the sandbox.
+            source_bashrc: Whether to source the bashrc before running the
+                command.
+            skip_num_lines: The number of lines to skip at the beginning of the
+                output.
+            run_in_background: Whether to run the command in the background.
+            env: Environment variables for the command in the sandbox.
+            timeout: (through kwargs) Raise subprocess.TimeoutExpired if the
+                command runs longer than this many seconds. The sandbox also
+                ends the command shortly afterwards.
+
+        Returns:
+            returncode
+            or
+            A tuple of (returncode, stdout, stderr).
+
+            255 means the sandbox could not be reached, as with ssh.
+        """
+        assert port_forward is None, ('port_forward is not supported for '
+                                      f'Modal, but got: {port_forward}')
+        if connect_timeout is None:
+            connect_timeout = _DEFAULT_CONNECT_TIMEOUT
+        if env:
+            # Not on the command line, where other local users could read it.
+            kwargs['env'] = dict(os.environ)
+            kwargs['env'][_MODAL_EXEC_ENV_VAR] = json.dumps(env)
+
+        if ssh_mode == SshMode.LOGIN:
+            assert isinstance(cmd, list), 'cmd must be a list for login mode.'
+            command = self._helper_command(connect_timeout, pty_mode=True) + cmd
+            proc = subprocess_utils.run(command,
+                                        shell=False,
+                                        check=False,
+                                        env=kwargs.get('env'))
+            return proc.returncode, '', ''
+
+        command_str = self._get_command_to_run(
+            cmd,
+            process_stream,
+            separate_stderr,
+            skip_num_lines=skip_num_lines,
+            source_bashrc=source_bashrc,
+            run_in_background=run_in_background)
+        command = [
+            shlex.quote(part)
+            for part in self._helper_command(connect_timeout,
+                                             timeout=kwargs.get('timeout'))
+        ] + ['/bin/bash', '-c', shlex.quote(command_str)]
+
+        log_path = os.path.expanduser(log_path)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+        executable = None
+        if not process_stream:
+            if stream_logs:
+                command += [
+                    f'| tee {shlex.quote(log_path)}',
+                    # This also requires the executor to be '/bin/bash' instead
+                    # of the default '/bin/sh'.
+                    '; exit ${PIPESTATUS[0]}'
+                ]
+            else:
+                command += [f'> {shlex.quote(log_path)}']
+            executable = '/bin/bash'
+
+        if ssh_mode == SshMode.INTERACTIVE:
+            # As in KubernetesCommandRunner, give the remote process a live
+            # stdin rather than one already at EOF.
+            kwargs.setdefault('stdin', subprocess.PIPE)
+        return log_lib.run_with_log(' '.join(command),
+                                    log_path,
+                                    require_outputs=require_outputs,
+                                    stream_logs=stream_logs,
+                                    process_stream=process_stream,
+                                    shell=True,
+                                    executable=executable,
+                                    **kwargs)
+
+    @timeline.event
+    def rsync(
+        self,
+        source: str,
+        target: str,
+        *,
+        up: bool,
+        # Advanced options.
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        max_retry: int = 1,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Uses 'rsync' tunnelled over Sandbox.exec to sync 'source' to 'target'.
+
+        Args:
+            source: The source path.
+            target: The target path.
+            up: The direction of the sync, True for local to cluster, False
+              for cluster to local.
+            log_path: Redirect stdout/stderr to the log_path.
+            stream_logs: Stream logs to the stdout/stderr.
+            max_retry: The maximum number of retries for the rsync command.
+              This value should be non-negative.
+            timeout: Optional total timeout in seconds for the rsync, including
+              all retries and backoff waits. None means no timeout (default).
+
+        Raises:
+            exceptions.CommandError: rsync command failed.
+        """
+        helper_path = shlex.quote(
+            os.path.join(self._HELPER_DIR, 'rsync_helper.sh'))
+        self._rsync(
+            source,
+            target,
+            node_destination=self.sandbox_id,
+            up=up,
+            rsh_option=helper_path,
+            log_path=log_path,
+            stream_logs=stream_logs,
+            max_retry=max_retry,
+            prefix_command=(f'chmod +x {helper_path} && '
+                            f'SKYPILOT_MODAL_PYTHON='
+                            f'{shlex.quote(sys.executable)} '),
+            # Over this transport rsync would treat ~/xx as a literal path, so
+            # replace ~ with the remote home directory.
+            get_remote_home_dir=self.get_remote_home_dir,
+            timeout=timeout)
+
+    def bootstrap_sandbox(self, log_path: str = os.devnull) -> None:
+        """Installs what SkyPilot needs in the sandbox. Safe to repeat.
+
+        Raises:
+            exceptions.CommandError: The sandbox could not be set up. Its
+                returncode is 255 if the sandbox could not be reached.
+        """
+        script_path = os.path.join(self._HELPER_DIR, 'sandbox_bootstrap.sh')
+        with open(script_path, 'r', encoding='utf-8') as f:
+            script = f.read()
+        returncode, stdout, stderr = self.run(
+            f'/bin/bash -c {shlex.quote(script)}',
+            log_path=log_path,
+            stream_logs=False,
+            require_outputs=True)
+        subprocess_utils.handle_returncode(
+            returncode,
+            'sandbox_bootstrap.sh',
+            f'Failed to set up Modal sandbox {self.sandbox_id}.',
+            stderr=stdout + stderr)
 
 
 class LocalProcessCommandRunner(CommandRunner):

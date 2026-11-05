@@ -6,7 +6,7 @@ determine the return type based on the value of require_outputs.
 """
 import enum
 import typing
-from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from typing_extensions import Literal
 
@@ -416,6 +416,93 @@ class KubernetesCommandRunner(CommandRunner):
             port_forward: List[Tuple[int, int]],
             connect_timeout: int = 1,
             ssh_mode: SshMode = SshMode.INTERACTIVE) -> List[str]:
+        ...
+
+
+class ModalCommandRunner(CommandRunner):
+    sandbox_id: str
+
+    def __init__(self, node: Tuple[str, ...], **kwargs) -> None:
+        ...
+
+    @typing.overload
+    def run(self,
+            cmd: Union[str, List[str]],
+            *,
+            port_forward: Optional[List[int]] = ...,
+            require_outputs: Literal[False] = ...,
+            log_path: str = ...,
+            process_stream: bool = ...,
+            stream_logs: bool = ...,
+            ssh_mode: SshMode = ...,
+            separate_stderr: bool = ...,
+            connect_timeout: Optional[int] = ...,
+            source_bashrc: bool = ...,
+            skip_num_lines: int = ...,
+            run_in_background: bool = ...,
+            env: Optional[Dict[str, str]] = ...,
+            **kwargs) -> int:
+        ...
+
+    @typing.overload
+    def run(self,
+            cmd: Union[str, List[str]],
+            *,
+            port_forward: Optional[List[int]] = ...,
+            require_outputs: Literal[True],
+            log_path: str = ...,
+            process_stream: bool = ...,
+            stream_logs: bool = ...,
+            ssh_mode: SshMode = ...,
+            separate_stderr: bool = ...,
+            connect_timeout: Optional[int] = ...,
+            source_bashrc: bool = ...,
+            skip_num_lines: int = ...,
+            run_in_background: bool = ...,
+            env: Optional[Dict[str, str]] = ...,
+            **kwargs) -> Tuple[int, str, str]:
+        ...
+
+    @typing.overload
+    def run(self,
+            cmd: Union[str, List[str]],
+            *,
+            port_forward: Optional[List[int]] = ...,
+            require_outputs: bool = ...,
+            log_path: str = ...,
+            process_stream: bool = ...,
+            stream_logs: bool = ...,
+            ssh_mode: SshMode = ...,
+            separate_stderr: bool = ...,
+            connect_timeout: Optional[int] = ...,
+            source_bashrc: bool = ...,
+            skip_num_lines: int = ...,
+            run_in_background: bool = ...,
+            env: Optional[Dict[str, str]] = ...,
+            **kwargs) -> Union[Tuple[int, str, str], int]:
+        ...
+
+    def rsync(
+        self,
+        source: str,
+        target: str,
+        *,
+        up: bool,
+        log_path: str = ...,
+        stream_logs: bool = ...,
+        max_retry: int = ...,
+        timeout: Optional[int] = ...,
+    ) -> None:
+        ...
+
+    def port_forward_command(
+            self,
+            port_forward: List[Tuple[int, int]],
+            connect_timeout: int = 1,
+            ssh_mode: SshMode = SshMode.INTERACTIVE) -> List[str]:
+        ...
+
+    def bootstrap_sandbox(self, log_path: str = ...) -> None:
         ...
 
 

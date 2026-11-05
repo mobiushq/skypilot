@@ -16,6 +16,7 @@ include sky/jobs/dashboard/static/*
 include sky/templates/*
 include sky/catalog/bundled/*/*/*.csv
 include sky/utils/kubernetes/*
+include sky/utils/modal/*
 include sky/ssh_node_pools/deploy/tunnel/*
 include sky/server/html/*
 recursive-include sky/dashboard/out *

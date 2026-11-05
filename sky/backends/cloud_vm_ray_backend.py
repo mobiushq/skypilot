@@ -2736,9 +2736,13 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
     @property
     def is_grpc_enabled_with_flag(self) -> bool:
         """Returns whether this handle has gRPC enabled and gRPC flag is set."""
-        return (env_options.Options.ENABLE_GRPC.get() and
-                self.is_grpc_enabled and
-                not isinstance(self.launched_resources.cloud, clouds.Slurm))
+        return (
+            env_options.Options.ENABLE_GRPC.get() and self.is_grpc_enabled and
+            not isinstance(self.launched_resources.cloud, clouds.Slurm) and
+            # The skylet's port can only be reached over an SSH tunnel or a
+            # port forward, and these clouds have neither.
+            repr(self.launched_resources.cloud
+                ).lower() not in provision_constants.EXEC_TRANSPORT_CLOUDS)
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-compatible dict."""

@@ -26,6 +26,11 @@ ERROR_NO_NODES_LAUNCHED = 'SKYPILOT_ERROR_NO_NODES_LAUNCHED'
 # share the same provisioning flow as the kubernetes cloud.
 K8S_BASED_CLOUDS = ['kubernetes', 'ssh']
 
+# Clouds whose nodes have no SSH and no reachable ports: every command and rsync
+# goes through the cloud's exec API, so SkyPilot cannot wait for SSH or tunnel
+# to the skylet's gRPC port.
+EXEC_TRANSPORT_CLOUDS = ['modal']
+
 # Names for Azure Deployments.
 DEPLOYMENT_NAME = 'skypilot-config'
 LEGACY_DEPLOYMENT_NAME = 'ray-config'

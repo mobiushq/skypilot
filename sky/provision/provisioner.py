@@ -673,7 +673,14 @@ def _post_provision_setup(
         is_k8s_cloud = cloud_name.lower(
         ) in provision_constants.K8S_BASED_CLOUDS
         is_slurm_cloud = cloud_name.lower() == 'slurm'
-        if not is_k8s_cloud and not is_slurm_cloud:
+        is_exec_transport_cloud = (cloud_name.lower()
+                                   in provision_constants.EXEC_TRANSPORT_CLOUDS)
+        if is_exec_transport_cloud:
+            # Reaching the sandbox is what SSH's wait would have proved, and the
+            # steps below need the tools this installs.
+            instance_setup.bootstrap_exec_transport_nodes(
+                cluster_info, ssh_credentials)
+        elif not is_k8s_cloud and not is_slurm_cloud:
             logger.debug(
                 f'\nWaiting for SSH to be available for {cluster_name!r} ...')
             wait_for_ssh(cluster_info, ssh_credentials)

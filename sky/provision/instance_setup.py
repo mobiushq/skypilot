@@ -421,6 +421,23 @@ def initialize_docker(cluster_name: str, docker_config: Dict[str, Any],
 
 
 @common.log_function_start_end
+@_auto_retry(should_retry=lambda e: isinstance(e, exceptions.CommandError) and e
+             .returncode == 255)
+@timeline.event
+def bootstrap_exec_transport_nodes(cluster_info: common.ClusterInfo,
+                                   ssh_credentials: Dict[str, Any]) -> None:
+    """Installs what SkyPilot needs on nodes reached through an exec API."""
+    runners = provision.get_command_runners(cluster_info.provider_name,
+                                            cluster_info, **ssh_credentials)
+
+    def _bootstrap(runner: command_runner.CommandRunner) -> None:
+        assert isinstance(runner, command_runner.ModalCommandRunner), runner
+        runner.bootstrap_sandbox(log_path=str(provision_logging.get_log_path()))
+
+    subprocess_utils.run_in_parallel(_bootstrap, runners)
+
+
+@common.log_function_start_end
 @timeline.event
 def setup_runtime_on_cluster(cluster_name: str, setup_commands: List[str],
                              cluster_info: common.ClusterInfo,
