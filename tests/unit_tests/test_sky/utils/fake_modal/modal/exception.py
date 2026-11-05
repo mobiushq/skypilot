@@ -19,3 +19,7 @@ class NotFoundError(Error):
 
 class PermissionDeniedError(Error):
     pass
+
+
+class AlreadyExistsError(Error):
+    pass

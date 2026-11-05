@@ -5,7 +5,7 @@ namespaces, chrooted into an overlay on an Ubuntu root filesystem. Exec enters
 the namespaces with nsenter under a clean environment, so processes outlive the
 exec that started them, and runtime setup (`pkill -9 dpkg`, `rm -rf
 /etc/security/limits.d`) acts on the sandbox and not on the host. The network
-is the host's. Needs root.
+is the host's. Needs root. As in a Modal container, MODAL_IS_REMOTE is 1.
 
     FAKE_MODAL_ROOTFS: the root filesystem, standing in for every image.
     FAKE_MODAL_STATE: where sandboxes and built images are kept.
@@ -27,6 +27,7 @@ _ENV = {
     'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     'HOME': '/root',
     'LANG': 'C.UTF-8',
+    'MODAL_IS_REMOTE': '1',
 }
 
 # Mounts what a container has on the root filesystem at `root`.
@@ -78,8 +79,15 @@ def _sandbox_dir(sandbox_id: str) -> str:
     return os.path.join(_state_dir(), 'sandboxes', sandbox_id)
 
 
+def _env() -> Dict[str, str]:
+    env = dict(_ENV)
+    if 'FAKE_MODAL_SERVER' in os.environ:
+        env['FAKE_MODAL_SERVER'] = os.environ['FAKE_MODAL_SERVER']
+    return env
+
+
 def _env_args() -> List[str]:
-    return [f'{key}={value}' for key, value in _ENV.items()]
+    return [f'{key}={value}' for key, value in _env().items()]
 
 
 def is_process_sandbox(sandbox_id: str) -> bool:
@@ -216,6 +224,14 @@ def list_ids(app_id: str, tags: Dict[str, str]) -> List[str]:
     return found
 
 
+def find_by_name(app_id: str, name: str) -> Optional[str]:
+    """The running sandbox in the app with the name, unique as in Modal."""
+    for sandbox_id in list_ids(app_id, {}):
+        if _record(sandbox_id)['kwargs'].get('name') == name:
+            return sandbox_id
+    return None
+
+
 def terminate(sandbox_id: str) -> None:
     pid = _record(sandbox_id)['pid']
     try:
@@ -237,7 +253,7 @@ def exec_args(sandbox_id: str, args: tuple, workdir: Optional[str],
     pid = _record(sandbox_id)['pid']
     if not _alive(pid):
         raise ProcessLookupError(f'{sandbox_id} has finished')
-    merged = dict(_ENV, **(env or {}))
+    merged = dict(_env(), **(env or {}))
     variables = [f'{key}={value}' for key, value in merged.items()]
     chdir = ['-C', workdir] if workdir else []
     return [
