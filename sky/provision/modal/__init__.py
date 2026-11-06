@@ -7,6 +7,7 @@ from sky.provision.modal.instance import get_cluster_info
 from sky.provision.modal.instance import get_command_runners
 from sky.provision.modal.instance import open_ports
 from sky.provision.modal.instance import query_instances
+from sky.provision.modal.instance import query_ports
 from sky.provision.modal.instance import run_instances
 from sky.provision.modal.instance import stop_instances
 from sky.provision.modal.instance import terminate_instances

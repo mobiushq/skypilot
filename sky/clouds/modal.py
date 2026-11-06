@@ -44,8 +44,6 @@ class Modal(clouds.Cloud):
              'Each cluster runs on one sandbox.'),
         clouds.CloudImplementationFeatures.SPOT_INSTANCE:
             (f'Spot instances are not supported on {_REPR}.'),
-        clouds.CloudImplementationFeatures.OPEN_PORTS:
-            (f'Opening ports is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.CUSTOM_DISK_TIER:
             (f'Custom disk tier is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.CUSTOM_NETWORK_TIER:
@@ -62,6 +60,8 @@ class Modal(clouds.Cloud):
         clouds.CloudImplementationFeatures.LOCAL_DISK:
             (f'Local disk is not supported on {_REPR}.'),
     }
+    # Modal opens a sandbox's ports (as tunnels) only when creating it.
+    OPEN_PORTS_VERSION = clouds.OpenPortsVersion.LAUNCH_ONLY
 
     PROVISIONER_VERSION = clouds.ProvisionerVersion.SKYPILOT
     STATUS_VERSION = clouds.StatusVersion.SKYPILOT

@@ -4,14 +4,19 @@ Each cluster is one Modal sandbox that SkyPilot creates and owns: it runs
 `sleep infinity` and SkyPilot runs everything else in it through
 `Sandbox.exec` (see ModalCommandRunner), so no SSH server or open port is
 needed. Tearing down terminates the sandbox, which stops billing.
+
+A task's `ports` are opened when the sandbox is created, as Modal tunnels:
+each gets a public HTTPS URL that `sky.endpoints` returns.
 """
 
+import dataclasses
 from typing import Any, Dict, List, Optional, Tuple
 
 from sky import sky_logging
 from sky.provision import common
 from sky.provision.modal import utils
 from sky.utils import command_runner
+from sky.utils import resources_utils
 from sky.utils import status_lib
 
 PROVIDER_NAME = 'modal'
@@ -22,6 +27,16 @@ _PLACEHOLDER_IP = '127.0.0.1'
 _RUNTIME_METADATA = common.ProvisionRuntimeMetadata(ssh_available=False)
 
 logger = sky_logging.init_logger(__name__)
+
+
+@dataclasses.dataclass
+class TunnelEndpoint(common.Endpoint):
+    """A sandbox port's Modal tunnel: a public HTTPS URL, no token needed."""
+    tunnel_url: str
+
+    def url(self, override_ip: Optional[str] = None) -> str:
+        del override_ip  # The tunnel host is the only way in.
+        return self.tunnel_url
 
 
 def _environment(provider_config: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -70,6 +85,7 @@ def run_instances(
         image_id=node_config.get('ImageId') or None,
         ttl_minutes=node_config.get('TtlMinutes') or None,
         environment=environment,
+        ports=config.ports_to_open_on_launch,
     )
     sandbox_id = sandbox.object_id
     utils.wait_for_sandbox_running(sandbox)
@@ -185,7 +201,9 @@ def open_ports(
     ports: List[str],
     provider_config: Optional[dict] = None,
 ) -> None:
-    raise NotImplementedError('open_ports is not supported for Modal.')
+    """Ports are opened by run_instances(): Modal only takes them when a
+    sandbox is created, so the cloud's OPEN_PORTS_VERSION is LAUNCH_ONLY."""
+    del cluster_name_on_cloud, ports, provider_config  # unused
 
 
 def cleanup_ports(
@@ -193,7 +211,31 @@ def cleanup_ports(
     ports: List[str],
     provider_config: Optional[dict] = None,
 ) -> None:
-    del cluster_name_on_cloud, ports, provider_config  # nothing opened
+    """Tunnels go away with the sandbox; nothing to clean up."""
+    del cluster_name_on_cloud, ports, provider_config  # unused
+
+
+def query_ports(
+    cluster_name_on_cloud: str,
+    ports: List[str],
+    head_ip: Optional[str] = None,
+    provider_config: Optional[Dict[str, Any]] = None,
+) -> Dict[int, List[common.Endpoint]]:
+    """Returns each port's TunnelEndpoint; empty until Modal has assigned
+    the tunnels."""
+    del head_ip  # A placeholder; tunnels are the way in.
+    port_set = resources_utils.port_ranges_to_set(ports)
+    if not port_set:
+        return {}
+    sandboxes = utils.list_cluster_sandboxes(cluster_name_on_cloud,
+                                             _environment(provider_config))
+    if not sandboxes:
+        return {}
+    return {
+        port: [TunnelEndpoint(tunnel_url=url)]
+        for port, url in utils.tunnel_urls(sandboxes[0]).items()
+        if port in port_set
+    }
 
 
 def cleanup_custom_multi_network(
