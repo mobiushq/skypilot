@@ -49,6 +49,15 @@ GPU_TYPES: Dict[str, Tuple[str, int, int, int, int]] = {
     'L4': ('L4', 24, 4, 16, 8),
     'T4': ('T4', 16, 4, 16, 8),
 }
+# Larger CPU and memory for a GPU sandbox, as multiples of the shape above.
+# Modal bills the cores and memory a sandbox requests, so each size is its own
+# row and price, named `<count>x-<ACC>--<vcpus>cpu-<mem>gb`; the base size
+# keeps its plain name. Five times the base memory is the 8 x B300 trainer of
+# a DeepSeek-V4.1-Flash LoRA run (64 cores, 1280 GiB), which Modal accepts.
+CPU_MULTIPLES = (1, 2)
+MEMORY_MULTIPLES = (1, 2, 3, 4, 5)
+SIZE_SEPARATOR = '--'
+
 # Other SkyPilot names for a Modal GPU type: Modal's A10 is the A10G that
 # AWS sells, and SkyPilot users ask for it by that name.
 ALIASES: Dict[str, str] = {'A10G': 'A10'}
@@ -106,19 +115,24 @@ def create_catalog(output_path: str = 'modal/vms.csv') -> None:
         for (gpu_type, acc_name, gpu_memory, vcpus_per_gpu, memory_per_gpu,
              max_count) in gpu_types:
             for count in range(1, max_count + 1):
-                vcpus = vcpus_per_gpu * count
-                memory = memory_per_gpu * count
-                writer.writerow([
-                    f'{count}x-{acc_name}',
-                    acc_name,
-                    count,
-                    vcpus,
-                    memory,
-                    usd_per_hour(gpu_type, count, vcpus, memory),
-                    '',
-                    REGION,
-                    _gpu_info(acc_name, count, gpu_memory),
-                ])
+                for cpu_multiple in CPU_MULTIPLES:
+                    for memory_multiple in MEMORY_MULTIPLES:
+                        vcpus = vcpus_per_gpu * count * cpu_multiple
+                        memory = memory_per_gpu * count * memory_multiple
+                        name = f'{count}x-{acc_name}'
+                        if (cpu_multiple, memory_multiple) != (1, 1):
+                            name += f'{SIZE_SEPARATOR}{vcpus}cpu-{memory}gb'
+                        writer.writerow([
+                            name,
+                            acc_name,
+                            count,
+                            vcpus,
+                            memory,
+                            usd_per_hour(gpu_type, count, vcpus, memory),
+                            '',
+                            REGION,
+                            _gpu_info(acc_name, count, gpu_memory),
+                        ])
         for vcpus, memory in CPU_SHAPES:
             writer.writerow([
                 f'cpu-{vcpus}x-{memory}gb',

@@ -197,6 +197,8 @@ class TestModalInstanceTypes:
         ('8x-A100', 'A100-40GB:8'),
         ('1x-A100-80GB', 'A100-80GB'),
         ('1x-RTXPRO6000', 'RTX-PRO-6000'),
+        ('8x-B300--64cpu-1280gb', 'B300:8'),
+        ('1x-A100-80GB--16cpu-64gb', 'A100-80GB'),
         ('cpu-2x-8gb', None),
     ])
     def test_modal_gpu(self, instance_type, gpu):
@@ -297,6 +299,17 @@ class TestModalLifecycle:
         assert 'gpu' not in kwargs
         assert kwargs['image'].tag == 'python:3.11-slim'
 
+    def test_larger_size_requests_its_cores_and_memory(self, fake_modal):
+        modal_instance.run_instances(
+            'global', 'c', 'c-abcd',
+            _provision_config(InstanceType='8x-B300--64cpu-1280gb',
+                              Cpus=64,
+                              MemoryGiB=1280))
+        (_, kwargs), = fake_modal.create_calls
+        assert kwargs['gpu'] == 'B300:8'
+        assert kwargs['cpu'] == 32
+        assert kwargs['memory'] == 1280 * 1024
+
     def test_create_is_idempotent_by_name(self, fake_modal):
         # A launch interrupted after create, before SkyPilot saw the ID.
         first = modal_utils.create_sandbox('c-abcd', '1x-T4', 4, 16, None, None)
@@ -381,6 +394,24 @@ class TestModalCloud:
         (chosen,) = feasible.resources_list
         assert chosen.instance_type == instance_type
         assert modal_utils.modal_gpu(instance_type) == gpu
+
+    def test_a_big_request_gets_a_larger_size(self):
+        # The DeepSeek-V4.1-Flash LoRA trainer: 8 x B300 with 64 vCPUs and
+        # 1280 GiB, more memory than the base size's 32 GiB a GPU.
+        r = resources_lib.Resources(infra='modal',
+                                    accelerators='B300:8',
+                                    cpus='64+',
+                                    memory='1280+')
+        feasible = modal_cloud.Modal()._get_feasible_launchable_resources(r)  # pylint: disable=protected-access
+        chosen = min(feasible.resources_list, key=lambda c: c.get_cost(3600))
+        assert chosen.instance_type == '8x-B300--64cpu-1280gb'
+        assert modal_cloud.Modal.get_vcpus_mem_from_instance_type(
+            chosen.instance_type) == (64, 1280)
+        # Modal bills the extra memory at the sandbox rate.
+        assert chosen.get_cost(3600) == pytest.approx(
+            8 * 0.001972 * 3600 + 3 * 3600 *
+            (32 * 0.0000131 + 1280 * 0.00000222),
+            rel=1e-4)
 
     def test_a10_stops_at_four(self):
         r = resources_lib.Resources(infra='modal', accelerators='A10:5')
