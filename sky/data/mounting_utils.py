@@ -294,6 +294,29 @@ def get_vastdata_mount_cmd(vastdata_credentials_path: str,
                                         read_only=read_only)
 
 
+def get_sandbox_mount_prerequisites_cmd(cloud_name: str,
+                                        fuse_device: str = '/dev/fuse') -> str:
+    """Returns a command that checks a sandbox can mount storage.
+
+    Sandbox clouds run the user's container image, which may have no FUSE
+    device and none of fuse3 (fusermount) or wget, which the mount utilities'
+    installers use. The command fails with a clear message without the device,
+    and installs the tools with apt if they are missing.
+    """
+    no_fuse = (f'Storage mounting (MOUNT, MOUNT_CACHED) needs FUSE, and this '
+               f'{cloud_name} sandbox has no {fuse_device}. Use mode: COPY, '
+               f'or a sandbox with FUSE.')
+    return (f'{{ [ -e {fuse_device} ] || '
+            f'{{ echo {shlex.quote(no_fuse)} >&2; exit 1; }}; }} && '
+            f'{command_runner.ALIAS_SUDO_TO_EMPTY_FOR_ROOT_CMD} && '
+            '{ { command -v fusermount3 >/dev/null 2>&1 || '
+            'command -v fusermount >/dev/null 2>&1; } && '
+            'command -v wget >/dev/null 2>&1 || '
+            '{ sudo apt-get update -y && '
+            'sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y '
+            '--no-install-recommends fuse3 wget; }; }')
+
+
 def get_gcs_mount_install_cmd() -> str:
     """Returns a command to install GCS mount utility gcsfuse."""
     install_cmd = ('ARCH=$(uname -m) && '

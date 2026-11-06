@@ -669,6 +669,15 @@ class Cloud:
         identities = cls.get_user_identities()
         return identities[0] if identities is not None else None
 
+    @classmethod
+    def storage_mount_prerequisites_command(cls) -> Optional[str]:
+        """A command run on each node before its MOUNT/MOUNT_CACHED storages.
+
+        For clouds whose nodes are containers that may lack FUSE or the tools
+        the mount utilities need. None: nothing to run.
+        """
+        return None
+
     def get_credential_file_mounts(self) -> Dict[str, str]:
         """Returns the files necessary to access this cloud.
 
