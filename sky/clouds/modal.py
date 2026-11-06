@@ -238,6 +238,9 @@ class Modal(clouds.Cloud):
         if instance_list is None:
             return resources_utils.FeasibleResources([], fuzzy_candidate_list,
                                                      None)
+        if resources.cpus is None and resources.memory is None:
+            # The larger sizes only serve a request that asks for them.
+            instance_list = [t for t in instance_list if '--' not in t]
         return resources_utils.FeasibleResources(_make(instance_list),
                                                  fuzzy_candidate_list, None)
 

@@ -132,11 +132,13 @@ def cluster_tags(cluster_name_on_cloud: str) -> Dict[str, str]:
 def modal_gpu(instance_type: str) -> Optional[str]:
     """Returns the Modal `gpu` argument for an instance type, e.g. `H100:2`.
 
-    GPU instance types are `<count>x-<ACC>`; CPU ones `cpu-<vcpus>x-<mem>gb`.
+    GPU instance types are `<count>x-<ACC>`, with `--<vcpus>cpu-<mem>gb` for a
+    larger size; CPU ones `cpu-<vcpus>x-<mem>gb`.
     """
     if instance_type.startswith('cpu-'):
         return None
-    count, acc = instance_type.split('x-', maxsplit=1)
+    count, acc = instance_type.split('--', maxsplit=1)[0].split('x-',
+                                                                maxsplit=1)
     gpu = ACC_TO_MODAL_GPU.get(acc)
     if gpu is None:
         raise ModalError(f'Unknown Modal instance type: {instance_type}')
