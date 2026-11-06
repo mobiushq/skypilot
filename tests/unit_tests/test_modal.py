@@ -11,6 +11,8 @@ from unittest import mock
 import pytest
 
 from sky import clouds
+from sky import core
+from sky import provision
 from sky import resources as resources_lib
 from sky.adaptors import modal as modal_adaptor
 from sky.backends import cloud_vm_ray_backend
@@ -38,6 +40,24 @@ class _NotFoundError(Exception):
 
 class _AlreadyExistsError(Exception):
     pass
+
+
+class _SandboxTimeoutError(TimeoutError):
+    pass
+
+
+class _Tunnel:
+    """modal.Tunnel: the TLS host and port Modal assigns to a sandbox port."""
+
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+
+    @property
+    def url(self):
+        if real_modal is not None:
+            return real_modal.Tunnel(self.host, self.port, '', 0).url
+        return f'https://{self.host}'
 
 
 class _Process:
@@ -75,6 +95,17 @@ class FakeSandbox:
             raise _NotFoundError(self.object_id)
         self.exit_code = 137
 
+    def tunnels(self, timeout=50):
+        if real_modal is not None:
+            inspect.signature(real_modal.Sandbox.tunnels).bind(self,
+                                                               timeout=timeout)
+        if not self._fake.tunnels_ready:
+            raise _SandboxTimeoutError()
+        return {
+            port: _Tunnel(f'{self.object_id}-{port}.r7.modal.host', 443)
+            for port in self.kwargs.get('encrypted_ports', [])
+        }
+
 
 class FakeImage:
 
@@ -95,6 +126,7 @@ class FakeModal:
         self.apps = {}
         self.create_calls = []
         self.probe = 0  # the start probe's exit code; None: exec fails
+        self.tunnels_ready = True
         self.token = {}
         fake = self
 
@@ -162,7 +194,8 @@ class FakeModal:
         self.Image = Image
         self.Sandbox = Sandbox
         self.exception = mock.Mock(NotFoundError=_NotFoundError,
-                                   AlreadyExistsError=_AlreadyExistsError)
+                                   AlreadyExistsError=_AlreadyExistsError,
+                                   SandboxTimeoutError=_SandboxTimeoutError)
         self.config = mock.Mock(config=mock.Mock(get=fake.token.get))
 
 
@@ -173,7 +206,7 @@ def fake_modal(monkeypatch):
     return fake
 
 
-def _provision_config(count=1, environment='', **node_config):
+def _provision_config(count=1, environment='', ports=None, **node_config):
     return provision_common.ProvisionConfig(
         provider_config={'environment': environment},
         authentication_config={},
@@ -189,7 +222,7 @@ def _provision_config(count=1, environment='', **node_config):
         count=count,
         tags={},
         resume_stopped_nodes=False,
-        ports_to_open_on_launch=None,
+        ports_to_open_on_launch=ports,
     )
 
 
@@ -352,7 +385,7 @@ class TestModalCloud:
     def test_unsupported_features(self):
         features = modal_cloud.Modal._CLOUD_UNSUPPORTED_FEATURES  # pylint: disable=protected-access
         for feature in ('STOP', 'AUTOSTOP', 'MULTI_NODE', 'SPOT_INSTANCE',
-                        'OPEN_PORTS', 'HOST_CONTROLLERS'):
+                        'HOST_CONTROLLERS'):
             assert getattr(clouds.CloudImplementationFeatures,
                            feature) in features
         # Autodown runs on the sandbox with the mounted token. Storage mounts
@@ -470,6 +503,82 @@ class TestModalCloud:
         assert variables['ttl_minutes'] == 45
         assert variables['modal_environment'] == 'staging'
         assert variables['image_id'] == 'pytorch/pytorch:latest'
+
+
+class TestModalPorts:
+    """A task's ports become Modal tunnels that sky.endpoints returns."""
+
+    _URL_30999 = 'https://sb-1-30999.r7.modal.host'
+
+    def _launch(self, ports=(30999, 29999)):
+        return provision.run_instances(
+            'Modal', 'global', 'c', 'c-abcd',
+            _provision_config(ports=list(ports) if ports else None))
+
+    def test_ports_are_opened_at_create(self, fake_modal):
+        self._launch()
+        (_, kwargs), = fake_modal.create_calls
+        assert kwargs['encrypted_ports'] == [29999, 30999]
+
+    def test_no_ports_no_tunnels(self, fake_modal):
+        self._launch(ports=None)
+        (_, kwargs), = fake_modal.create_calls
+        assert 'encrypted_ports' not in kwargs
+        assert provision.query_ports('Modal', 'c-abcd', ['30999']) == {}
+
+    def test_query_ports_returns_tunnel_urls(self, fake_modal):
+        del fake_modal
+        self._launch()
+        endpoints = provision.query_ports('Modal', 'c-abcd', ['29999', '30999'])
+        assert {p: e[0].url() for p, e in endpoints.items()} == {
+            29999: 'https://sb-1-29999.r7.modal.host',
+            30999: self._URL_30999,
+        }
+        # The sandbox's placeholder IP is not the way in.
+        assert endpoints[30999][0].url('127.0.0.1') == self._URL_30999
+        only = provision.query_ports('Modal', 'c-abcd', ['30999'])
+        assert list(only) == [30999]
+
+    def test_no_endpoints_before_tunnels_or_after_teardown(self, fake_modal):
+        self._launch()
+        fake_modal.tunnels_ready = False
+        assert provision.query_ports('Modal', 'c-abcd', ['30999']) == {}
+        fake_modal.tunnels_ready = True
+        modal_instance.terminate_instances('c-abcd')
+        assert provision.query_ports('Modal', 'c-abcd', ['30999']) == {}
+        provision.cleanup_ports('Modal', 'c-abcd', ['30999'], {})
+
+    def test_ports_are_feasible(self):
+        r = resources_lib.Resources(infra='modal',
+                                    accelerators='T4:1',
+                                    ports=['30999', '29999'])
+        modal_cloud.Modal.check_features_are_supported(
+            r, {clouds.CloudImplementationFeatures.OPEN_PORTS})
+        feasible = modal_cloud.Modal()._get_feasible_launchable_resources(r)  # pylint: disable=protected-access
+        assert feasible.resources_list
+
+    def test_sky_endpoints(self, fake_modal):
+        del fake_modal
+        self._launch(ports=[30999])
+        handle = mock.MagicMock(
+            spec=cloud_vm_ray_backend.CloudVmRayResourceHandle)
+        handle.cluster_name_on_cloud = 'c-abcd'
+        handle.head_ip = '127.0.0.1'
+        handle.launched_resources = resources_lib.Resources(
+            cloud=modal_cloud.Modal(), instance_type='1x-T4', ports=['30999'])
+        record = {
+            'name': 'c',
+            'status': status_lib.ClusterStatus.UP,
+            'handle': handle,
+        }
+        with mock.patch('sky.backends.backend_utils.get_clusters',
+                        return_value=[record]), mock.patch(
+                            'sky.global_user_state.get_cluster_yaml_dict',
+                            return_value={'provider': {
+                                'environment': ''
+                            }}):
+            assert core.endpoints('c') == {30999: self._URL_30999}
+            assert core.endpoints('c', 30999) == {30999: self._URL_30999}
 
 
 def _read_toml(path):

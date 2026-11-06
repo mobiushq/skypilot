@@ -42,6 +42,8 @@ SANDBOX_COMMAND = ('sleep', 'infinity')
 # How long a new sandbox may take to run its first command. GPU sandboxes
 # can wait for capacity.
 START_TIMEOUT_SECONDS = 20 * 60
+# How long to wait for a running sandbox's tunnel addresses.
+TUNNELS_TIMEOUT_SECONDS = 30
 
 # SkyPilot accelerator name -> Modal GPU type.
 ACC_TO_MODAL_GPU = {
@@ -185,10 +187,12 @@ def create_sandbox(
     image_id: Optional[str],
     ttl_minutes: Optional[int],
     environment: Optional[str] = None,
+    ports: Optional[List[int]] = None,
 ) -> Any:
     """Creates the cluster's sandbox and returns it.
 
-    If a sandbox with the cluster's name exists, that one is returned.
+    `ports` get public TLS tunnels. Modal only opens them at creation, so if a
+    sandbox with the cluster's name exists, that one is returned as it is.
     """
     modal = modal_adaptor.modal
     app = _lookup_app(environment, create=True)
@@ -207,6 +211,8 @@ def create_sandbox(
     gpu = modal_gpu(instance_type)
     if gpu is not None:
         kwargs['gpu'] = gpu
+    if ports:
+        kwargs['encrypted_ports'] = sorted(ports)
     logger.debug(f'Creating Modal sandbox for {cluster_name_on_cloud}: '
                  f'{instance_type}, timeout {kwargs["timeout"]}s')
     try:
@@ -244,6 +250,20 @@ def terminate_sandbox(sandbox: Any) -> None:
         sandbox.terminate()
     except modal_adaptor.modal.exception.NotFoundError:
         logger.debug(f'Sandbox {sandbox.object_id} is already gone.')
+
+
+def tunnel_urls(sandbox: Any,
+                timeout: int = TUNNELS_TIMEOUT_SECONDS) -> Dict[int, str]:
+    """Returns the public HTTPS URL of each of the sandbox's open ports.
+
+    Empty if Modal has not assigned the tunnels within `timeout` seconds.
+    """
+    try:
+        tunnels = sandbox.tunnels(timeout=timeout)
+    except modal_adaptor.modal.exception.SandboxTimeoutError:
+        logger.debug(f'Tunnels of sandbox {sandbox.object_id} are not ready.')
+        return {}
+    return {int(port): tunnel.url for port, tunnel in tunnels.items()}
 
 
 def to_cluster_status(sandbox: Any) -> Optional['status_lib.ClusterStatus']:
