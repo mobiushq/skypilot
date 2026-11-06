@@ -2,6 +2,7 @@
 
 import inspect
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -12,8 +13,11 @@ import pytest
 from sky import clouds
 from sky import resources as resources_lib
 from sky.adaptors import modal as modal_adaptor
+from sky.backends import cloud_vm_ray_backend
 from sky.catalog import common as catalog_common
 from sky.clouds import modal as modal_cloud
+from sky.data import mounting_utils
+from sky.data import storage as storage_lib
 from sky.provision import common as provision_common
 from sky.provision.modal import exec_helper
 from sky.provision.modal import instance as modal_instance
@@ -351,8 +355,9 @@ class TestModalCloud:
                         'OPEN_PORTS', 'HOST_CONTROLLERS'):
             assert getattr(clouds.CloudImplementationFeatures,
                            feature) in features
-        # Autodown runs on the sandbox with the mounted token.
-        for feature in ('IMAGE_ID', 'AUTODOWN'):
+        # Autodown runs on the sandbox with the mounted token. Storage mounts
+        # run over exec, after a FUSE check on the sandbox.
+        for feature in ('IMAGE_ID', 'AUTODOWN', 'STORAGE_MOUNTING'):
             assert getattr(clouds.CloudImplementationFeatures,
                            feature) not in features
 
@@ -611,3 +616,102 @@ class TestModalCommandRunner:
     def test_login_is_refused(self, local_modal):
         with pytest.raises(NotImplementedError, match='modal shell'):
             local_modal.run(['bash'], ssh_mode=command_runner.SshMode.LOGIN)
+
+
+def _fake_bin(directory, name, body='exit 0'):
+    path = directory / name
+    path.write_text(f'#!/bin/bash\n{body}\n')
+    path.chmod(0o755)
+
+
+class TestModalStorageMounts:
+    """A gs:// MOUNT runs over exec: the FUSE check, then SkyPilot's script."""
+
+    @pytest.fixture
+    def sandbox(self, tmp_path, monkeypatch, local_modal):
+        bin_dir = tmp_path / 'bin'
+        bin_dir.mkdir()
+        # gcsfuse records its arguments; the tools the check looks for exist.
+        _fake_bin(bin_dir, 'gcsfuse', f'echo "$@" > {tmp_path}/gcsfuse.args')
+        _fake_bin(bin_dir, 'fusermount3')
+        _fake_bin(bin_dir, 'wget')
+        _fake_bin(bin_dir, 'apt-get', f'touch {tmp_path}/apt.ran')
+        del monkeypatch
+        return tmp_path, local_modal
+
+    @staticmethod
+    def _on_path(tmp_path, cmd):
+        # The command's own shell sets PATH, so the fakes come first.
+        return f'export PATH={tmp_path}/bin:$PATH && {cmd}'
+
+    def _mount_command(self, tmp_path, fuse_device):
+        mount_path = str(tmp_path / 'results')
+        mount = mounting_utils.get_mounting_command(
+            mount_path, mounting_utils.get_gcs_mount_install_cmd(),
+            mounting_utils.get_gcs_mount_cmd('bk-results', mount_path,
+                                             'bk-run-1'))
+        check = mounting_utils.get_sandbox_mount_prerequisites_cmd(
+            'Modal', fuse_device)
+        return self._on_path(tmp_path, f'({check}) && {mount}')
+
+    def test_mount_runs_over_exec(self, sandbox):
+        tmp_path, runner = sandbox
+        fuse = tmp_path / 'fuse'
+        fuse.touch()
+        rc, out, err = runner.run(self._mount_command(tmp_path, str(fuse)),
+                                  require_outputs=True,
+                                  stream_logs=False)
+        assert rc == 0, (out, err)
+        args = (tmp_path / 'gcsfuse.args').read_text().split()
+        assert args[-2:] == ['bk-results', str(tmp_path / 'results')]
+        assert args[args.index('--only-dir') + 1] == 'bk-run-1'
+        assert not (tmp_path / 'apt.ran').exists()  # the tools were there
+
+    def test_no_fuse_fails_before_mounting(self, sandbox):
+        tmp_path, runner = sandbox
+        rc, out, err = runner.run(self._mount_command(tmp_path,
+                                                      str(tmp_path /
+                                                          'no-fuse')),
+                                  require_outputs=True,
+                                  stream_logs=False,
+                                  separate_stderr=True)
+        assert rc == 1, (out, err)
+        assert 'this Modal sandbox has no' in err and 'mode: COPY' in err
+        assert not (tmp_path / 'gcsfuse.args').exists()
+
+    def test_missing_tools_are_installed(self, sandbox):
+        tmp_path, runner = sandbox
+        (tmp_path / 'bin' / 'wget').unlink()
+        fuse = tmp_path / 'fuse'
+        fuse.touch()
+        check = mounting_utils.get_sandbox_mount_prerequisites_cmd(
+            'Modal', str(fuse))
+        # Only the fakes on PATH, so tools on this machine don't count.
+        for tool in ('whoami', 'env', 'touch'):
+            os.symlink(shutil.which(tool), tmp_path / 'bin' / tool)
+        assert runner.run(f'export PATH={tmp_path}/bin && {check}',
+                          stream_logs=False) == 0
+        assert (tmp_path / 'apt.ran').exists()
+
+    @pytest.mark.parametrize('cloud', [modal_cloud.Modal, clouds.Daytona])
+    def test_backend_runs_the_check_first(self, cloud):
+        store = mock.Mock()
+        store.mount_command.return_value = 'MOUNT-GCS'
+        storage = mock.Mock(mode=storage_lib.StorageMode.MOUNT,
+                            mount_config=None,
+                            source='gs://bk-results/bk-run-1',
+                            stores={'gcs': store})
+        handle = mock.Mock()
+        handle.launched_resources.cloud = cloud()
+        backend = cloud_vm_ray_backend.CloudVmRayBackend()
+        backend.log_dir = '/tmp'
+        with mock.patch.object(cloud_vm_ray_backend.backend_utils,
+                               'parallel_data_transfer_to_nodes') as transfer:
+            backend._execute_storage_mounts(handle, {'/results': storage})  # pylint: disable=protected-access
+        cmd = transfer.call_args.kwargs['cmd']
+        assert cmd.startswith('({ [ -e /dev/fuse ]')
+        assert cmd.endswith(') && MOUNT-GCS')
+        assert f'this {cloud._REPR} sandbox' in cmd  # pylint: disable=protected-access
+
+    def test_clouds_with_fuse_run_no_check(self):
+        assert clouds.GCP.storage_mount_prerequisites_command() is None

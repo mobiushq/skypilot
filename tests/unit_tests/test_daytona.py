@@ -329,6 +329,11 @@ class TestDaytonaCloudFeatures:
         # Spot GPU sandboxes are supported.
         assert (clouds.CloudImplementationFeatures.SPOT_INSTANCE
                 not in features)
+        # Storage mounts run over SSH, after a FUSE check on the sandbox.
+        assert (clouds.CloudImplementationFeatures.STORAGE_MOUNTING
+                not in features)
+        assert '/dev/fuse' in (
+            daytona.Daytona.storage_mount_prerequisites_command())
 
     def test_repr(self):
         assert repr(daytona.Daytona()) == 'Daytona'

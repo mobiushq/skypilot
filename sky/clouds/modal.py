@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from sky import catalog
 from sky import clouds
 from sky import skypilot_config
+from sky.data import mounting_utils
 from sky.provision.modal import utils as modal_utils
 from sky.utils import registry
 from sky.utils import resources_utils
@@ -45,8 +46,6 @@ class Modal(clouds.Cloud):
             (f'Spot instances are not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.OPEN_PORTS:
             (f'Opening ports is not supported on {_REPR}.'),
-        clouds.CloudImplementationFeatures.STORAGE_MOUNTING:
-            (f'Storage mounting is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.CUSTOM_DISK_TIER:
             (f'Custom disk tier is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.CUSTOM_NETWORK_TIER:
@@ -66,6 +65,12 @@ class Modal(clouds.Cloud):
 
     PROVISIONER_VERSION = clouds.ProvisionerVersion.SKYPILOT
     STATUS_VERSION = clouds.StatusVersion.SKYPILOT
+
+    @classmethod
+    def storage_mount_prerequisites_command(cls) -> Optional[str]:
+        # Storage mounts run over the same runner as everything else; the
+        # sandbox needs FUSE, which depends on the sandbox, not on SkyPilot.
+        return mounting_utils.get_sandbox_mount_prerequisites_cmd(cls._REPR)
 
     @classmethod
     def _unsupported_features_for_resources(
