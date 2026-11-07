@@ -1472,6 +1472,18 @@ _REMOTE_IDENTITY_SCHEMA = {
     }
 }
 
+# Modal and Daytona: unset, their credentials go to controller clusters only;
+# LOCAL_CREDENTIALS uploads them to every cluster, NO_UPLOAD to none.
+_CONTROLLER_ONLY_REMOTE_IDENTITY_SCHEMA = {
+    'remote_identity': {
+        'type': 'string',
+        'case_insensitive_enum': [
+            RemoteIdentityOptions.LOCAL_CREDENTIALS.value,
+            RemoteIdentityOptions.NO_UPLOAD.value,
+        ]
+    }
+}
+
 _REMOTE_IDENTITY_SCHEMA_KUBERNETES = {
     'remote_identity': {
         'anyOf': [{
@@ -3016,6 +3028,8 @@ def get_config_schema():
                 {'remote_identity': _PROPERTY_NAME_OR_CLUSTER_NAME_TO_PROPERTY})
         elif cloud == 'kubernetes':
             config['properties'].update(_REMOTE_IDENTITY_SCHEMA_KUBERNETES)
+        elif cloud in ('modal', 'daytona'):
+            config['properties'].update(_CONTROLLER_ONLY_REMOTE_IDENTITY_SCHEMA)
         else:
             config['properties'].update(_REMOTE_IDENTITY_SCHEMA)
 
