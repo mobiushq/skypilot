@@ -747,6 +747,10 @@ def _reject_not_ready_volume(volume_name: str, record: Dict[str, Any],
         f'or {remove_hint}.')
 
 
+# Clouds whose credentials reach only controller clusters by default.
+_CONTROLLER_ONLY_CREDENTIAL_CLOUDS = ('modal', 'daytona')
+
+
 # TODO: too many things happening here - leaky abstraction. Refactor.
 @timeline.event
 def write_cluster_config(
@@ -907,6 +911,24 @@ def write_cluster_config(
             if (remote_identity_config ==
                     schemas.RemoteIdentityOptions.NO_UPLOAD.value):
                 excluded_clouds.add(cloud_obj)
+
+    # Modal's token and Daytona's API key are account-wide: whoever holds one
+    # can start, read and delete every sandbox in the account. Only
+    # controllers (which launch and tear down other clusters) get them, unless
+    # the cloud's `remote_identity` is LOCAL_CREDENTIALS, which autodown run on
+    # the cluster itself needs. Not read from the task's config: a task can't
+    # opt in. (NO_UPLOAD, handled above, keeps them from controllers too.)
+    if controller_utils.Controllers.from_name(cluster_name,
+                                              expect_exact_match=False) is None:
+        for cloud_str in _CONTROLLER_ONLY_CREDENTIAL_CLOUDS:
+            identity = skypilot_config.get_effective_workspace_region_config(
+                cloud=cloud_str,
+                region=region.name,
+                keys=('remote_identity',),
+                default_value=None)
+            if (str(identity).upper() !=
+                    schemas.RemoteIdentityOptions.LOCAL_CREDENTIALS.value):
+                excluded_clouds.add(registry.CLOUD_REGISTRY.from_str(cloud_str))
 
     credentials = sky_check.get_cloud_credential_file_mounts(excluded_clouds)
 
